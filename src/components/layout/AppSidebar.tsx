@@ -1,3 +1,4 @@
+
 'use client';
 
 import Link from 'next/link';
@@ -35,9 +36,8 @@ function AppSidebarLink({ link, pathname }: AppSidebarLinkProps) {
   
   return (
     <SidebarMenuItem>
-      <Link href={link.href} passHref legacyBehavior>
+      <Link href={link.href}>
         <SidebarMenuButton
-          as="a" // Render as an anchor tag
           isActive={isActive}
           tooltip={link.label}
           onClick={handleClick}
