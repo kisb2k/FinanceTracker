@@ -16,6 +16,9 @@ let db: Firestore;
 
 if (getApps().length === 0) {
   app = initializeApp(firebaseConfig);
+  // The call to createAccountTable() has been removed from here
+  // as it was causing a circular dependency.
+  // accountService.ts now handles ensuring the table exists within its own functions.
 } else {
   app = getApps()[0];
 }
