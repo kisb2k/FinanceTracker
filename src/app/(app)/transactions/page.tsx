@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -9,36 +9,17 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel,
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, Copy, Tag, Search } from "lucide-react";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger, DialogClose } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, Copy, Tag, Search, Loader2, AlertCircle, FolderPlus, Settings2 } from "lucide-react";
 import type { Transaction, Account, Category } from '@/lib/types';
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
-
-// Placeholder data
-const initialTransactions: Transaction[] = [
-  { id: 't1', accountId: '1', date: '2024-07-28', description: 'Starbucks Coffee', amount: -5.75, category: 'Food & Drink', isDebit: true, fileName: 'chase_import_07_2024.csv', loadDateTime: new Date().toISOString() },
-  { id: 't2', accountId: '1', date: '2024-07-27', description: 'Monthly Salary', amount: 3200.00, category: 'Income', isDebit: false, fileName: 'chase_import_07_2024.csv', loadDateTime: new Date().toISOString() },
-  { id: 't3', accountId: '2', date: '2024-07-26', description: 'Netflix Subscription', amount: -15.99, category: 'Entertainment', isDebit: true, fileName: 'amex_import_07_2024.csv', loadDateTime: new Date().toISOString() },
-  { id: 't4', accountId: '1', date: '2024-07-25', description: 'Groceries Whole Foods', amount: -85.20, category: 'Groceries', isDebit: true, fileName: 'chase_import_07_2024.csv', loadDateTime: new Date().toISOString() },
-  { id: 't5', accountId: '1', date: '2024-07-25', description: 'Groceries Whole Foods', amount: -85.20, category: 'Groceries', isDebit: true, fileName: 'manual_entry.csv', loadDateTime: new Date(Date.now() - 86400000).toISOString() }, // Potential duplicate
-];
-
-const accounts: Account[] = [
-  { id: '1', name: 'Chase Checking', type: 'debit', balance: 0, currency: 'USD' },
-  { id: '2', name: 'Amex Gold', type: 'credit', balance: 0, currency: 'USD' },
-];
-
-const categoriesData: Category[] = [
-  { id: 'c1', name: 'Food & Drink' },
-  { id: 'c2', name: 'Income' },
-  { id: 'c3', name: 'Entertainment' },
-  { id: 'c4', name: 'Groceries' },
-  { id: 'c5', name: 'Utilities' },
-  { id: 'c6', name: 'Uncategorized' },
-];
+import { getAccounts } from '@/services/accountService';
+import { getCategories, addCategory, deleteCategory as deleteCategoryService } from '@/services/categoryService';
+import { getTransactions, addTransaction, updateTransaction, deleteTransaction as deleteTransactionService } from '@/services/transactionService';
+import { format } from 'date-fns';
 
 interface EditFormState {
   id: string;
@@ -46,152 +27,257 @@ interface EditFormState {
   date: string;
   description: string;
   amount: string;
-  category: string;
+  category: string; // Stores category NAME for select, or new name
 }
 
-const defaultEditFormState: EditFormState = {
-  id: '',
+const defaultAddTransactionData = {
   accountId: '',
-  date: '',
+  date: format(new Date(), 'yyyy-MM-dd'),
   description: '',
   amount: '',
-  category: 'Uncategorized',
+  category: '', // Store category NAME
 };
 
 export default function TransactionsPage() {
-  const [transactions, setTransactions] = useState<Transaction[]>(initialTransactions);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
+  
+  const [isLoading, setIsLoading] = useState(true);
+  const [pageError, setPageError] = useState<string | null>(null);
+
   const [searchTerm, setSearchTerm] = useState('');
-  const [selectedAccount, setSelectedAccount] = useState<string>('all');
-  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all'); // Renamed to avoid conflict
+  const [selectedAccountFilter, setSelectedAccountFilter] = useState<string>('all');
+  const [selectedCategoryFilter, setSelectedCategoryFilter] = useState<string>('all');
 
-  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false);
+  const [isAddTransactionDialogOpen, setIsAddTransactionDialogOpen] = useState(false);
+  const [newTransactionData, setNewTransactionData] = useState(defaultAddTransactionData);
+
+  const [isEditTransactionDialogOpen, setIsEditTransactionDialogOpen] = useState(false);
   const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
-  const [editFormState, setEditFormState] = useState<EditFormState>(defaultEditFormState);
+  const [editFormState, setEditFormState] = useState<EditFormState>({ id: '', accountId: '', date: '', description: '', amount: '', category: '' });
 
-  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+  const [isDeleteTransactionDialogOpen, setIsDeleteTransactionDialogOpen] = useState(false);
   const [deletingTransactionId, setDeletingTransactionId] = useState<string | null>(null);
 
+  const [isManageCategoriesDialogOpen, setIsManageCategoriesDialogOpen] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [isDeletingCategory, setIsDeletingCategory] = useState<Category | null>(null);
+
+
   const { toast } = useToast();
+
+  const fetchPageData = useCallback(async () => {
+    setIsLoading(true);
+    setPageError(null);
+    try {
+      const [fetchedAccounts, fetchedCategories, fetchedTransactions] = await Promise.all([
+        getAccounts(),
+        getCategories(),
+        getTransactions()
+      ]);
+      setAccounts(fetchedAccounts);
+      setCategories(fetchedCategories);
+      setTransactions(fetchedTransactions);
+    } catch (e) {
+      const errorMsg = (e as Error).message || "Failed to load page data.";
+      setPageError(errorMsg);
+      toast({ title: "Error", description: errorMsg, variant: "destructive" });
+    } finally {
+      setIsLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    fetchPageData();
+  }, [fetchPageData]);
 
   useEffect(() => {
     if (editingTransaction) {
       setEditFormState({
         id: editingTransaction.id,
         accountId: editingTransaction.accountId,
-        date: editingTransaction.date.split('T')[0], // Format for date input
+        date: editingTransaction.date ? format(new Date(editingTransaction.date), 'yyyy-MM-dd') : '',
         description: editingTransaction.description,
         amount: String(editingTransaction.amount),
-        category: editingTransaction.category || 'Uncategorized',
+        category: editingTransaction.category || '', // Use category name
       });
-    } else {
-      setEditFormState(defaultEditFormState);
     }
   }, [editingTransaction]);
 
   const filteredTransactions = useMemo(() => {
     return transactions.filter(tx => {
-      const matchesSearch = tx.description.toLowerCase().includes(searchTerm.toLowerCase()) || (tx.category && tx.category.toLowerCase().includes(searchTerm.toLowerCase()));
-      const matchesAccount = selectedAccount === 'all' || tx.accountId === selectedAccount;
-      const matchesCategory = selectedCategoryFilter === 'all' || tx.category === categoriesData.find(c => c.id === selectedCategoryFilter)?.name;
+      const accountName = accounts.find(acc => acc.id === tx.accountId)?.name || '';
+      const searchLower = searchTerm.toLowerCase();
+      const matchesSearch = 
+        tx.description.toLowerCase().includes(searchLower) ||
+        (tx.category && tx.category.toLowerCase().includes(searchLower)) ||
+        accountName.toLowerCase().includes(searchLower);
+      const matchesAccount = selectedAccountFilter === 'all' || tx.accountId === selectedAccountFilter;
+      const matchesCategory = selectedCategoryFilter === 'all' || tx.category === categories.find(c => c.id === selectedCategoryFilter)?.name;
       return matchesSearch && matchesAccount && matchesCategory;
     });
-  }, [transactions, searchTerm, selectedAccount, selectedCategoryFilter]);
+  }, [transactions, searchTerm, selectedAccountFilter, selectedCategoryFilter, accounts, categories]);
 
   const getAccountName = (accountId: string) => accounts.find(acc => acc.id === accountId)?.name || 'Unknown Account';
 
-  const handleRemoveDuplicates = () => {
-    const uniqueTransactions: Transaction[] = [];
-    const seen = new Set<string>();
-    let duplicateCount = 0;
+  const handleFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>, setState: Function) => {
+    const { name, value } = e.target;
+    setState((prev: any) => ({ ...prev, [name]: value }));
+  };
+  
+  const handleSelectChange = (name: string, value: string, setState: Function) => {
+     setState((prev: any) => ({ ...prev, [name]: value}));
+  };
 
-    transactions.forEach(tx => {
-      const key = `${tx.date}-${tx.description.toLowerCase()}-${tx.amount.toFixed(2)}`;
-      if (!seen.has(key)) {
-        uniqueTransactions.push(tx);
-        seen.add(key);
-      } else {
-        duplicateCount++;
-      }
-    });
-    if (duplicateCount > 0) {
-        // For now, just show an alert. Actual removal can be complex.
-        // setTransactions(uniqueTransactions);
-        // toast({ title: "Duplicates Found", description: `${duplicateCount} potential duplicates identified. UI for removal TBD.`});
-        alert(`Identified ${duplicateCount} potential duplicates. (UI for selective removal TBD)`);
-    } else {
-        toast({ title: "No Duplicates", description: "No obvious duplicate transactions found."});
+  const handleAddTransactionSubmit = async () => {
+    const amountValue = parseFloat(newTransactionData.amount);
+    if (!newTransactionData.accountId || !newTransactionData.date || !newTransactionData.description || isNaN(amountValue) || !newTransactionData.category) {
+      toast({ title: "Validation Error", description: "Please fill all fields: Account, Date, Description, valid Amount, and Category.", variant: "destructive" });
+      return;
+    }
+    
+    try {
+      const newTx = await addTransaction({
+        accountId: newTransactionData.accountId,
+        date: newTransactionData.date, // format ensures YYYY-MM-DD
+        description: newTransactionData.description,
+        amount: amountValue,
+        category: newTransactionData.category, // Store category name
+      });
+      setTransactions(prev => [newTx, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+      toast({ title: "Success", description: "Transaction added successfully." });
+      setIsAddTransactionDialogOpen(false);
+      setNewTransactionData(defaultAddTransactionData);
+    } catch (e) {
+      toast({ title: "Error", description: (e as Error).message || "Failed to add transaction.", variant: "destructive" });
     }
   };
 
   const handleOpenEditDialog = (transaction: Transaction) => {
     setEditingTransaction(transaction);
-    setIsEditDialogOpen(true);
+    setIsEditTransactionDialogOpen(true);
   };
 
-  const handleEditFormChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
-    const { name, value } = e.target;
-    setEditFormState(prev => ({ ...prev, [name]: value }));
-  };
-  
-  const handleEditCategoryChange = (value: string) => {
-     setEditFormState(prev => ({ ...prev, category: value}));
-  }
-
-  const handleSaveTransaction = () => {
+  const handleEditTransactionSubmit = async () => {
     if (!editingTransaction) return;
 
     const amountValue = parseFloat(editFormState.amount);
-    if (isNaN(amountValue)) {
-      toast({ title: "Error", description: "Invalid amount.", variant: "destructive" });
+    if (!editFormState.accountId || !editFormState.date || !editFormState.description || isNaN(amountValue) || !editFormState.category) {
+      toast({ title: "Validation Error", description: "Please fill all fields: Account, Date, Description, valid Amount, and Category.", variant: "destructive" });
       return;
     }
-
-    const updatedTransaction: Transaction = {
-      ...editingTransaction,
-      date: new Date(editFormState.date).toISOString(),
-      description: editFormState.description,
-      amount: amountValue,
-      category: editFormState.category,
-      isDebit: amountValue < 0, // Update isDebit based on amount sign
-    };
-
-    setTransactions(prev => prev.map(tx => tx.id === updatedTransaction.id ? updatedTransaction : tx));
-    toast({ title: "Success", description: "Transaction updated successfully." });
-    setIsEditDialogOpen(false);
-    setEditingTransaction(null);
+    
+    try {
+      const updatedTx = await updateTransaction(editingTransaction.id, {
+        accountId: editFormState.accountId,
+        date: editFormState.date, // format ensures YYYY-MM-DD
+        description: editFormState.description,
+        amount: amountValue,
+        category: editFormState.category, // Store category name
+      });
+      setTransactions(prev => prev.map(tx => tx.id === updatedTx.id ? updatedTx : tx).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
+      toast({ title: "Success", description: "Transaction updated successfully." });
+      setIsEditTransactionDialogOpen(false);
+      setEditingTransaction(null);
+    } catch (e) {
+      toast({ title: "Error", description: (e as Error).message || "Failed to update transaction.", variant: "destructive" });
+    }
   };
 
   const handleOpenDeleteDialog = (transactionId: string) => {
     setDeletingTransactionId(transactionId);
-    setIsDeleteDialogOpen(true);
+    setIsDeleteTransactionDialogOpen(true);
   };
 
-  const handleDeleteTransaction = () => {
+  const handleDeleteTransactionConfirm = async () => {
     if (!deletingTransactionId) return;
     const txToDelete = transactions.find(tx => tx.id === deletingTransactionId);
-    setTransactions(prev => prev.filter(tx => tx.id !== deletingTransactionId));
-    toast({ title: "Success", description: `Transaction "${txToDelete?.description}" deleted.`, variant: "destructive" });
-    setIsDeleteDialogOpen(false);
-    setDeletingTransactionId(null);
-  };
-  
-  const resetEditDialog = () => {
-    setEditingTransaction(null);
-    setEditFormState(defaultEditFormState);
+    try {
+      await deleteTransactionService(deletingTransactionId);
+      setTransactions(prev => prev.filter(tx => tx.id !== deletingTransactionId));
+      toast({ title: "Success", description: `Transaction "${txToDelete?.description}" deleted.`, variant: "destructive" });
+      setIsDeleteTransactionDialogOpen(false);
+      setDeletingTransactionId(null);
+    } catch (e) {
+       toast({ title: "Error", description: (e as Error).message || "Failed to delete transaction.", variant: "destructive" });
+    }
   };
 
+  const handleAddCategorySubmit = async () => {
+    if (!newCategoryName.trim()) {
+      toast({ title: "Validation Error", description: "Category name cannot be empty.", variant: "destructive" });
+      return;
+    }
+    try {
+      const newCat = await addCategory({ name: newCategoryName.trim() });
+      setCategories(prev => [...prev, newCat].sort((a,b) => a.name.localeCompare(b.name)));
+      toast({ title: "Success", description: `Category "${newCat.name}" added.`});
+      setNewCategoryName('');
+      // Optionally close manage categories dialog or refresh list within it
+    } catch (e) {
+      toast({ title: "Error adding category", description: (e as Error).message, variant: "destructive" });
+    }
+  };
+
+  const handleDeleteCategoryConfirm = async () => {
+    if (!isDeletingCategory) return;
+    try {
+      await deleteCategoryService(isDeletingCategory.id);
+      setCategories(prev => prev.filter(cat => cat.id !== isDeletingCategory.id));
+      toast({ title: "Success", description: `Category "${isDeletingCategory.name}" deleted.`, variant: "destructive" });
+      setIsDeletingCategory(null);
+    } catch (e) {
+      toast({ title: "Error deleting category", description: (e as Error).message, variant: "destructive" });
+    }
+  };
+  
+  const resetAddTransactionDialog = () => setNewTransactionData(defaultAddTransactionData);
+  const resetEditTransactionDialog = () => setEditingTransaction(null);
+
+
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <Loader2 className="h-12 w-12 animate-spin text-primary" />
+        <p className="ml-4 text-lg">Loading transactions data...</p>
+      </div>
+    );
+  }
+
+  if (pageError) {
+    return (
+      <Card className="text-center py-10 border-destructive">
+        <CardHeader>
+          <AlertCircle className="mx-auto h-12 w-12 text-destructive" />
+          <CardTitle className="mt-4 text-destructive">Error Loading Data</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <CardDescription className="text-destructive-foreground">{pageError}</CardDescription>
+        </CardContent>
+        <CardFooter className="justify-center">
+          <Button onClick={fetchPageData}>
+            <PlusCircle className="mr-2 h-5 w-5" /> Try Again
+          </Button>
+        </CardFooter>
+      </Card>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
         <h1 className="text-3xl font-bold tracking-tight font-headline">Transactions</h1>
-        <div className="flex gap-2">
-           <Button variant="outline" onClick={handleRemoveDuplicates}>
-            <Copy className="mr-2 h-4 w-4" /> Remove Duplicates
+        <div className="flex gap-2 flex-wrap">
+          <Button variant="outline" onClick={() => setIsManageCategoriesDialogOpen(true)}>
+            <Settings2 className="mr-2 h-4 w-4" /> Manage Categories
           </Button>
-          <Button asChild>
+           <Button onClick={() => setIsAddTransactionDialogOpen(true)}>
+            <FolderPlus className="mr-2 h-4 w-4" /> Add Transaction
+          </Button>
+          <Button variant="outline" asChild>
             <Link href="/transactions/import">
-              <Upload className="mr-2 h-4 w-4" /> Import Transactions
+              <Upload className="mr-2 h-4 w-4" /> Import File
             </Link>
           </Button>
         </div>
@@ -204,31 +290,27 @@ export default function TransactionsPage() {
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search descriptions, categories..."
+                placeholder="Search descriptions, categories, accounts..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-8"
               />
             </div>
-            <Select value={selectedAccount} onValueChange={setSelectedAccount}>
-              <SelectTrigger>
-                <SelectValue placeholder="Filter by Account" />
-              </SelectTrigger>
+            <Select value={selectedAccountFilter} onValueChange={setSelectedAccountFilter}>
+              <SelectTrigger><SelectValue placeholder="Filter by Account" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Accounts</SelectItem>
                 {accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}
               </SelectContent>
             </Select>
             <Select value={selectedCategoryFilter} onValueChange={setSelectedCategoryFilter}>
-              <SelectTrigger>
-                <SelectValue placeholder="Filter by Category" />
-              </SelectTrigger>
+              <SelectTrigger><SelectValue placeholder="Filter by Category" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
-                {categoriesData.map(cat => <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>)}
+                {categories.map(cat => <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>)}
               </SelectContent>
             </Select>
-             <Button variant="outline" onClick={() => { setSearchTerm(''); setSelectedAccount('all'); setSelectedCategoryFilter('all');}}>
+             <Button variant="outline" onClick={() => { setSearchTerm(''); setSelectedAccountFilter('all'); setSelectedCategoryFilter('all');}}>
                 Clear Filters
              </Button>
           </div>
@@ -249,7 +331,7 @@ export default function TransactionsPage() {
             <TableBody>
               {filteredTransactions.length > 0 ? filteredTransactions.map((tx) => (
                 <TableRow key={tx.id} className="hover:bg-muted/50 transition-colors">
-                  <TableCell>{new Date(tx.date).toLocaleDateString()}</TableCell>
+                  <TableCell>{tx.date ? format(new Date(tx.date), 'MM/dd/yyyy') : 'N/A'}</TableCell>
                   <TableCell className="font-medium max-w-xs truncate" title={tx.description}>{tx.description}</TableCell>
                   <TableCell>{getAccountName(tx.accountId)}</TableCell>
                   <TableCell>
@@ -268,15 +350,9 @@ export default function TransactionsPage() {
                   </TableCell>
                   <TableCell className="text-center">
                     <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
+                      <DropdownMenuTrigger asChild><Button variant="ghost" size="icon"><MoreHorizontal className="h-4 w-4" /></Button></DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => handleOpenEditDialog(tx)}>
-                            <Edit3 className="mr-2 h-4 w-4" /> Edit
-                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleOpenEditDialog(tx)}><Edit3 className="mr-2 h-4 w-4" /> Edit</DropdownMenuItem>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem className="text-destructive focus:text-destructive focus:bg-destructive/10" onClick={() => handleOpenDeleteDialog(tx.id)}>
                           <Trash2 className="mr-2 h-4 w-4" /> Delete
@@ -288,7 +364,7 @@ export default function TransactionsPage() {
               )) : (
                 <TableRow>
                   <TableCell colSpan={7} className="h-24 text-center">
-                    No transactions found. Try adjusting your filters or importing new data.
+                    No transactions found. Try adjusting your filters or add a new transaction.
                   </TableCell>
                 </TableRow>
               )}
@@ -297,77 +373,138 @@ export default function TransactionsPage() {
         </CardContent>
       </Card>
 
-      {/* Edit Transaction Dialog */}
-      <Dialog open={isEditDialogOpen} onOpenChange={(isOpen) => { setIsEditDialogOpen(isOpen); if (!isOpen) resetEditDialog(); }}>
+      {/* Add Transaction Dialog */}
+      <Dialog open={isAddTransactionDialogOpen} onOpenChange={(isOpen) => { setIsAddTransactionDialogOpen(isOpen); if (!isOpen) resetAddTransactionDialog(); }}>
         <DialogContent className="sm:max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle>Edit Transaction</DialogTitle>
-            <DialogDescription>
-              Update the details of your transaction. Click save when you're done.
-            </DialogDescription>
-          </DialogHeader>
+          <DialogHeader><DialogTitle>Add New Transaction</DialogTitle><DialogDescription>Enter the details for your new transaction.</DialogDescription></DialogHeader>
+          <div className="grid gap-4 py-4">
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="add-accountId" className="text-right">Account</Label>
+              <Select name="accountId" value={newTransactionData.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setNewTransactionData)}>
+                <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
+                <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="add-date" className="text-right">Date</Label>
+              <Input id="add-date" name="date" type="date" value={newTransactionData.date} onChange={(e) => handleFormChange(e, setNewTransactionData)} className="col-span-3" />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="add-description" className="text-right">Description</Label>
+              <Input id="add-description" name="description" value={newTransactionData.description} onChange={(e) => handleFormChange(e, setNewTransactionData)} className="col-span-3" />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="add-amount" className="text-right">Amount</Label>
+              <Input id="add-amount" name="amount" type="number" step="0.01" value={newTransactionData.amount} onChange={(e) => handleFormChange(e, setNewTransactionData)} className="col-span-3" placeholder="e.g., -25.50 or 100" />
+            </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+              <Label htmlFor="add-category" className="text-right">Category</Label>
+              <Select name="category" value={newTransactionData.category} onValueChange={(value) => handleSelectChange("category", value, setNewTransactionData)}>
+                <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
+                <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+            <Button onClick={handleAddTransactionSubmit}>Add Transaction</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Transaction Dialog */}
+      <Dialog open={isEditTransactionDialogOpen} onOpenChange={(isOpen) => { setIsEditTransactionDialogOpen(isOpen); if (!isOpen) resetEditTransactionDialog(); }}>
+        <DialogContent className="sm:max-w-[480px]">
+          <DialogHeader><DialogTitle>Edit Transaction</DialogTitle><DialogDescription>Update transaction details.</DialogDescription></DialogHeader>
           {editingTransaction && (
             <div className="grid gap-4 py-4">
+               <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="edit-accountId" className="text-right">Account</Label>
+                <Select name="accountId" value={editFormState.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setEditFormState)}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
+                  <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
+                </Select>
+              </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-date" className="text-right">Date</Label>
-                <Input id="edit-date" name="date" type="date" value={editFormState.date} onChange={handleEditFormChange} className="col-span-3" />
+                <Input id="edit-date" name="date" type="date" value={editFormState.date} onChange={(e) => handleFormChange(e, setEditFormState)} className="col-span-3" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-description" className="text-right">Description</Label>
-                <Input id="edit-description" name="description" value={editFormState.description} onChange={handleEditFormChange} className="col-span-3" />
+                <Input id="edit-description" name="description" value={editFormState.description} onChange={(e) => handleFormChange(e, setEditFormState)} className="col-span-3" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-amount" className="text-right">Amount</Label>
-                <Input id="edit-amount" name="amount" type="number" step="0.01" value={editFormState.amount} onChange={handleEditFormChange} className="col-span-3" placeholder="e.g., -25.50 or 100" />
+                <Input id="edit-amount" name="amount" type="number" step="0.01" value={editFormState.amount} onChange={(e) => handleFormChange(e, setEditFormState)} className="col-span-3" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-category" className="text-right">Category</Label>
-                <Select name="category" value={editFormState.category} onValueChange={handleEditCategoryChange}>
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue placeholder="Select a category" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {categoriesData.map(cat => (
-                      <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>
-                    ))}
-                  </SelectContent>
+                <Select name="category" value={editFormState.category} onValueChange={(value) => handleSelectChange("category", value, setEditFormState)}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
+                  <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
                 </Select>
-              </div>
-               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="edit-account" className="text-right">Account</Label>
-                <Input id="edit-account" value={getAccountName(editFormState.accountId)} className="col-span-3" disabled />
               </div>
             </div>
           )}
           <DialogFooter>
             <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
-            <Button onClick={handleSaveTransaction}>Save Changes</Button>
+            <Button onClick={handleEditTransactionSubmit}>Save Changes</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
       {/* Delete Transaction Confirmation Dialog */}
-      <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+      <AlertDialog open={isDeleteTransactionDialogOpen} onOpenChange={setIsDeleteTransactionDialogOpen}>
         <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
-            <AlertDialogDescription>
-              This action will permanently delete the transaction: "{transactions.find(tx => tx.id === deletingTransactionId)?.description}". This cannot be undone.
-            </AlertDialogDescription>
+          <AlertDialogHeader><AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+            <AlertDialogDescription>This action will permanently delete the transaction: "{transactions.find(tx => tx.id === deletingTransactionId)?.description}". This cannot be undone.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel onClick={() => setDeletingTransactionId(null)}>Cancel</AlertDialogCancel>
-            <AlertDialogAction onClick={handleDeleteTransaction} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
-              Delete Transaction
-            </AlertDialogAction>
+            <AlertDialogAction onClick={handleDeleteTransactionConfirm} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">Delete Transaction</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      <div className="mt-4 flex justify-end">
-        {/* Add pagination if needed */}
-      </div>
+       {/* Manage Categories Dialog */}
+      <Dialog open={isManageCategoriesDialogOpen} onOpenChange={setIsManageCategoriesDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader><DialogTitle>Manage Categories</DialogTitle><DialogDescription>Add or remove spending categories.</DialogDescription></DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="flex gap-2">
+              <Input placeholder="New category name" value={newCategoryName} onChange={(e) => setNewCategoryName(e.target.value)} />
+              <Button onClick={handleAddCategorySubmit}><PlusCircle className="mr-2 h-4 w-4" /> Add</Button>
+            </div>
+            <div className="max-h-60 overflow-y-auto space-y-2 border rounded-md p-2">
+              {categories.length > 0 ? categories.map(cat => (
+                <div key={cat.id} className="flex items-center justify-between p-2 rounded hover:bg-muted/50">
+                  <span>{cat.name}</span>
+                  <Button variant="ghost" size="icon" className="text-destructive hover:text-destructive" onClick={() => setIsDeletingCategory(cat)}>
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              )) : <p className="text-sm text-muted-foreground text-center py-2">No categories yet. Add one above.</p>}
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild><Button variant="outline">Close</Button></DialogClose>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Category Confirmation */}
+      <AlertDialog open={!!isDeletingCategory} onOpenChange={(open) => !open && setIsDeletingCategory(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>Delete Category: {isDeletingCategory?.name}?</AlertDialogTitle>
+          <AlertDialogDescription>Are you sure you want to delete this category? This action cannot be undone. Transactions using this category will NOT be automatically re-categorized.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setIsDeletingCategory(null)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDeleteCategoryConfirm} className="bg-destructive hover:bg-destructive/90">Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
     </div>
   );
 }
-

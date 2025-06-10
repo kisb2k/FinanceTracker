@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger, DialogClose } from "@/components/ui/dialog";
@@ -14,31 +14,16 @@ import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
 import { PlusCircle, Edit3, Trash2, Target, AlertTriangle, FileText, Loader2, AlertCircleIcon } from "lucide-react";
 import type { Budget, Category, BudgetCategoryLimit } from '@/lib/types';
-import { getBudgets, addBudget, updateBudget, deleteBudget, type AddBudgetData } from '@/services/budgetService';
+import { getBudgets, addBudget, updateBudget, deleteBudget as deleteBudgetService, type AddBudgetData } from '@/services/budgetService';
+import { getCategories } from '@/services/categoryService'; // Import categoryService
 import { useToast } from '@/hooks/use-toast';
 
-// Kept as a predefined list for now. Could be fetched from Firestore in the future.
-const initialCategories: Category[] = [
-  { id: 'c1', name: 'Food & Drink' },
-  { id: 'c2', name: 'Groceries' },
-  { id: 'c3', name: 'Transportation' },
-  { id: 'c4', name: 'Housing' },
-  { id: 'c5', name: 'Entertainment' },
-  { id: 'c6', name: 'Shopping' },
-  { id: 'c7', name: 'Utilities' },
-  { id: 'c8', name: 'Healthcare' },
-  { id: 'c9', name: 'Personal Care' },
-  { id: 'c10', name: 'Education' },
-  { id: 'c11', name: 'Gifts & Donations' },
-  { id: 'c12', name: 'Other' },
-];
-
-// Simulated current spending. This would ideally come from actual transaction data.
-// For now, progress bars will show 0% until this is integrated.
+// Simulated current spending - will be 0 until transaction integration
 const currentSpending: Record<string, Record<string, number>> = {};
 
 export default function BudgetsPage() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
+  const [allCategories, setAllCategories] = useState<Category[]>([]); // State for fetched categories
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
@@ -49,24 +34,28 @@ export default function BudgetsPage() {
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [deletingBudgetId, setDeletingBudgetId] = useState<string | null>(null);
 
-
-  useEffect(() => {
-    fetchBudgets();
-  }, []);
-
-  const fetchBudgets = async () => {
+  const fetchPageData = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const fetchedBudgets = await getBudgets();
+      const [fetchedBudgets, fetchedCategories] = await Promise.all([
+        getBudgets(),
+        getCategories()
+      ]);
       setBudgets(fetchedBudgets);
+      setAllCategories(fetchedCategories);
     } catch (e) {
-      setError((e as Error).message || "Failed to load budgets.");
-      toast({ title: "Error", description: "Could not fetch budgets.", variant: "destructive" });
+      const errorMsg = (e as Error).message || "Failed to load budget data.";
+      setError(errorMsg);
+      toast({ title: "Error", description: errorMsg, variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [toast]);
+
+  useEffect(() => {
+    fetchPageData();
+  }, [fetchPageData]);
 
   const resetBudgetForm = () => {
     setEditingBudget(null);
@@ -79,7 +68,9 @@ export default function BudgetsPage() {
         tempCategoryLimits: budgetToEdit.categoryLimits ? [...budgetToEdit.categoryLimits] : [] 
       });
     } else {
-      setEditingBudget({ isDefault: false, timePeriod: 'monthly', tempCategoryLimits: [] });
+      // Initialize with empty limits for all available categories if needed, or start empty
+      const initialLimits = allCategories.map(cat => ({ categoryId: cat.id, limit: 0 }));
+      setEditingBudget({ name: '', isDefault: false, timePeriod: 'monthly', tempCategoryLimits: initialLimits });
     }
     setIsBudgetDialogOpen(true);
   };
@@ -90,13 +81,20 @@ export default function BudgetsPage() {
       return;
     }
 
-    const totalBudget = editingBudget.tempCategoryLimits.reduce((sum, cl) => sum + (cl.limit || 0), 0);
+    // Filter out category limits where limit is 0 or not set, unless you want to store 0 limits
+    const validCategoryLimits = editingBudget.tempCategoryLimits.filter(cl => cl.limit > 0);
+    if (validCategoryLimits.length === 0) {
+        toast({ title: "Validation Error", description: "Please set a limit for at least one category.", variant: "destructive" });
+        return;
+    }
+
+    const totalBudget = validCategoryLimits.reduce((sum, cl) => sum + (cl.limit || 0), 0);
     
     const budgetDataPayload = {
       name: editingBudget.name!,
       isDefault: editingBudget.isDefault || false,
       timePeriod: editingBudget.timePeriod!,
-      categoryLimits: editingBudget.tempCategoryLimits!,
+      categoryLimits: validCategoryLimits, // Use filtered limits
       totalBudgetAmount: totalBudget,
     };
 
@@ -119,23 +117,23 @@ export default function BudgetsPage() {
   
   const handleCategoryLimitChange = (categoryId: string, limitStr: string) => {
     if (!editingBudget) return;
-    const limit = parseFloat(limitStr) || 0; // Treat empty or invalid as 0
+    const limit = parseFloat(limitStr) || 0; 
 
     setEditingBudget(prev => {
       if (!prev) return null;
-      const existingLimits = prev.tempCategoryLimits || [];
-      let newLimits = existingLimits.filter(cl => cl.categoryId !== categoryId);
-      
-      // Only add/update if the category is intended to be part of the budget
-      // This means if a user types then erases, it should effectively remove it or set to 0
-      // The check for limit > 0 has been removed to allow zero limits.
-      // Consider if a 0 limit means "not budgeted" or "budgeted at $0". For now, it's kept.
-      newLimits.push({ categoryId, limit });
+      let existingLimits = prev.tempCategoryLimits ? [...prev.tempCategoryLimits] : [];
+      const limitIndex = existingLimits.findIndex(cl => cl.categoryId === categoryId);
+
+      if (limitIndex > -1) {
+        existingLimits[limitIndex] = { ...existingLimits[limitIndex], limit };
+      } else {
+        existingLimits.push({ categoryId, limit });
+      }
       
       return { 
         ...prev, 
-        tempCategoryLimits: newLimits.sort((a,b) => 
-          initialCategories.findIndex(c=>c.id===a.categoryId) - initialCategories.findIndex(c=>c.id===b.categoryId)
+        tempCategoryLimits: existingLimits.sort((a,b) => 
+          allCategories.findIndex(c=>c.id===a.categoryId) - allCategories.findIndex(c=>c.id===b.categoryId)
         ) 
       };
     });
@@ -150,7 +148,7 @@ export default function BudgetsPage() {
     if (!deletingBudgetId) return;
     const budgetToDelete = budgets.find(b => b.id === deletingBudgetId);
     try {
-      await deleteBudget(deletingBudgetId);
+      await deleteBudgetService(deletingBudgetId);
       setBudgets(budgets.filter(b => b.id !== deletingBudgetId));
       toast({ title: "Success", description: `Budget "${budgetToDelete?.name}" deleted.`, variant: "destructive" });
       setIsDeleteDialogOpen(false);
@@ -180,7 +178,7 @@ export default function BudgetsPage() {
           <CardDescription className="text-destructive-foreground">{error}</CardDescription>
         </CardContent>
         <CardFooter className="justify-center">
-          <Button onClick={fetchBudgets}>
+          <Button onClick={fetchPageData}>
             <PlusCircle className="mr-2 h-5 w-5" /> Try Again
           </Button>
         </CardFooter>
@@ -192,9 +190,10 @@ export default function BudgetsPage() {
     <div className="flex flex-col gap-6">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold tracking-tight font-headline">Budgets</h1>
-        <Button onClick={() => openBudgetDialog()}>
+        <Button onClick={() => openBudgetDialog()} disabled={allCategories.length === 0}>
           <PlusCircle className="mr-2 h-5 w-5" /> Create Budget
         </Button>
+        {allCategories.length === 0 && <p className="text-sm text-muted-foreground">Please add categories first (via Transactions page) to create budgets.</p>}
       </div>
 
       {budgets.length === 0 ? (
@@ -207,7 +206,7 @@ export default function BudgetsPage() {
             <CardDescription>Start managing your finances by creating your first budget.</CardDescription>
           </CardContent>
           <CardFooter className="justify-center">
-            <Button onClick={() => openBudgetDialog()}>
+            <Button onClick={() => openBudgetDialog()} disabled={allCategories.length === 0}>
               <PlusCircle className="mr-2 h-5 w-5" /> Create Your First Budget
             </Button>
           </CardFooter>
@@ -245,7 +244,7 @@ export default function BudgetsPage() {
                 <CardContent className="flex-grow space-y-3">
                   <h4 className="text-sm font-medium text-muted-foreground">Category Limits:</h4>
                   {budget.categoryLimits && budget.categoryLimits.length > 0 ? budget.categoryLimits.map(cl => {
-                    const category = initialCategories.find(c => c.id === cl.categoryId);
+                    const category = allCategories.find(c => c.id === cl.categoryId);
                     const spent = currentSpending[budget.id]?.[cl.categoryId] || 0;
                     const progress = cl.limit > 0 ? (spent / cl.limit) * 100 : 0;
                     const categoryIsOverBudget = cl.limit !== undefined && spent > cl.limit;
@@ -306,23 +305,23 @@ export default function BudgetsPage() {
               </div>
               
               <h4 className="font-medium mt-4 col-span-4">Category Limits ($)</h4>
-              {initialCategories.map(category => {
+              {allCategories.length > 0 ? allCategories.map(category => {
                  const currentLimitObj = editingBudget.tempCategoryLimits?.find(cl => cl.categoryId === category.id);
-                 const currentLimitValue = currentLimitObj ? currentLimitObj.limit : undefined;
+                 const currentLimitValue = currentLimitObj ? currentLimitObj.limit : 0; // Default to 0 if not found
                  return (
                   <div key={category.id} className="grid grid-cols-4 items-center gap-4">
                       <Label htmlFor={`limit-${category.id}`} className="text-right">{category.name}</Label>
                       <Input 
                           id={`limit-${category.id}`} 
                           type="number" 
-                          value={currentLimitValue === undefined ? '' : String(currentLimitValue)}
+                          value={String(currentLimitValue)} // Ensure value is always a string
                           onChange={(e) => handleCategoryLimitChange(category.id, e.target.value)}
                           className="col-span-3" 
                           placeholder="e.g., 200" 
                       />
                   </div>
                  );
-              })}
+              }) : <p className="col-span-4 text-sm text-muted-foreground">No categories available. Please add categories on the Transactions page first.</p>}
             </div>
           )}
           <DialogFooter>
@@ -352,4 +351,3 @@ export default function BudgetsPage() {
     </div>
   );
 }
-
