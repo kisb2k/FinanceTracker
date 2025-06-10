@@ -6,20 +6,14 @@ import Link from 'next/link';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger, DialogClose } from "@/components/ui/dialog";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from '@/hooks/use-toast';
-import { PlusCircle, Edit3, Trash2, DollarSign, CreditCard, Landmark as LandmarkIcon, TrendingUp } from "lucide-react";
+import { PlusCircle, Edit3, Trash2, DollarSign, CreditCard, Landmark as LandmarkIcon, TrendingUp, Loader2, AlertCircle } from "lucide-react";
 import type { Account, AccountType } from '@/lib/types';
-
-// Placeholder data
-const initialAccounts: Account[] = [
-  { id: '1', name: 'Chase Checking', type: 'debit', balance: 5230.50, currency: 'USD', lastImported: new Date().toISOString() },
-  { id: '2', name: 'Amex Gold', type: 'credit', balance: -875.20, currency: 'USD' },
-  { id: '3', name: 'Savings High-Yield', type: 'savings', balance: 15000.00, currency: 'USD' },
-];
+import { getAccounts, addAccount, updateAccount, deleteAccount, type AddAccountData } from '@/services/accountService';
 
 const accountTypeIcons: Record<AccountType, React.ElementType> = {
   debit: DollarSign,
@@ -28,8 +22,12 @@ const accountTypeIcons: Record<AccountType, React.ElementType> = {
   investment: TrendingUp,
 };
 
+const supportedCurrencies = ['USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD'];
+
 export default function AccountsPage() {
-  const [accounts, setAccounts] = useState<Account[]>(initialAccounts);
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
 
   // Add Account State
@@ -37,65 +35,97 @@ export default function AccountsPage() {
   const [newAccountName, setNewAccountName] = useState('');
   const [newAccountType, setNewAccountType] = useState<AccountType | ''>('');
   const [newInitialBalance, setNewInitialBalance] = useState('');
+  const [newAccountCurrency, setNewAccountCurrency] = useState<string>('USD');
 
   // Edit Account State
   const [isEditAccountDialogOpen, setIsEditAccountDialogOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<Account | null>(null);
   const [editedAccountName, setEditedAccountName] = useState('');
   const [editedAccountBalance, setEditedAccountBalance] = useState('');
-  // Note: Account type is generally not editable once transactions are associated. For simplicity, we'll allow name and balance edits.
+  const [editedAccountCurrency, setEditedAccountCurrency] = useState<string>('USD');
+
 
   // Delete Account State
   const [isDeleteConfirmOpen, setIsDeleteConfirmOpen] = useState(false);
   const [deletingAccountId, setDeletingAccountId] = useState<string | null>(null);
 
+  useEffect(() => {
+    fetchAccounts();
+  }, []);
 
-  const handleAddAccount = () => {
-    if (!newAccountName || !newAccountType) {
-      toast({ title: "Error", description: "Please fill in account name and type.", variant: "destructive" });
+  const fetchAccounts = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const fetchedAccounts = await getAccounts();
+      setAccounts(fetchedAccounts);
+    } catch (e) {
+      setError((e as Error).message || "Failed to load accounts.");
+      toast({ title: "Error", description: "Could not fetch accounts.", variant: "destructive" });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleAddAccount = async () => {
+    if (!newAccountName || !newAccountType || !newAccountCurrency) {
+      toast({ title: "Error", description: "Please fill in account name, type, and currency.", variant: "destructive" });
       return;
     }
-    const newId = `acc_${Date.now()}`;
-    const balance = parseFloat(newInitialBalance) || 0;
-    const newAcc: Account = {
-      id: newId,
-      name: newAccountName,
-      type: newAccountType as AccountType,
-      balance: newAccountType === 'credit' ? -Math.abs(balance) : Math.abs(balance),
-      currency: 'USD', // Assuming USD for now
-    };
-    setAccounts([...accounts, newAcc]);
-    toast({ title: "Success", description: `Account "${newAcc.name}" added.` });
-    setNewAccountName('');
-    setNewAccountType('');
-    setNewInitialBalance('');
-    setIsAddAccountDialogOpen(false);
+    try {
+      const balance = parseFloat(newInitialBalance) || 0;
+      const accountData: AddAccountData = {
+        name: newAccountName,
+        type: newAccountType as AccountType,
+        initialBalance: balance,
+        currency: newAccountCurrency,
+      };
+      const newAcc = await addAccount(accountData);
+      setAccounts(prev => [...prev, newAcc].sort((a, b) => a.name.localeCompare(b.name)));
+      toast({ title: "Success", description: `Account "${newAcc.name}" added.` });
+      resetAddAccountForm();
+      setIsAddAccountDialogOpen(false);
+    } catch (e) {
+      toast({ title: "Error", description: (e as Error).message || "Failed to add account.", variant: "destructive" });
+    }
   };
 
   const openEditDialog = (account: Account) => {
     setEditingAccount(account);
     setEditedAccountName(account.name);
     setEditedAccountBalance(String(account.type === 'credit' ? Math.abs(account.balance) : account.balance));
+    setEditedAccountCurrency(account.currency);
     setIsEditAccountDialogOpen(true);
   };
 
-  const handleUpdateAccount = () => {
-    if (!editingAccount || !editedAccountName) {
-      toast({ title: "Error", description: "Account name cannot be empty.", variant: "destructive" });
+  const handleUpdateAccount = async () => {
+    if (!editingAccount || !editedAccountName || !editedAccountCurrency) {
+      toast({ title: "Error", description: "Account name and currency cannot be empty.", variant: "destructive" });
       return;
     }
-    const balance = parseFloat(editedAccountBalance) || 0;
-    setAccounts(accounts.map(acc => 
-      acc.id === editingAccount.id 
-      ? { ...acc, 
-          name: editedAccountName, 
-          balance: acc.type === 'credit' ? -Math.abs(balance) : Math.abs(balance) 
-        } 
-      : acc
-    ));
-    toast({ title: "Success", description: `Account "${editedAccountName}" updated.` });
-    setIsEditAccountDialogOpen(false);
-    setEditingAccount(null);
+    try {
+      const balance = parseFloat(editedAccountBalance) || 0;
+      const updates = {
+        name: editedAccountName,
+        balance: editingAccount.type === 'credit' ? -Math.abs(balance) : Math.abs(balance),
+        currency: editedAccountCurrency,
+      };
+      
+      await updateAccount(editingAccount.id, updates);
+      
+      setAccounts(prevAccounts => 
+        prevAccounts.map(acc => 
+          acc.id === editingAccount.id 
+          ? { ...acc, ...updates } 
+          : acc
+        ).sort((a, b) => a.name.localeCompare(b.name))
+      );
+      toast({ title: "Success", description: `Account "${editedAccountName}" updated.` });
+      setIsEditAccountDialogOpen(false);
+      resetEditAccountForm();
+    } catch (e) {
+       toast({ title: "Error", description: (e as Error).message || "Failed to update account.", variant: "destructive" });
+    }
   };
 
   const openDeleteConfirm = (accountId: string) => {
@@ -103,27 +133,61 @@ export default function AccountsPage() {
     setIsDeleteConfirmOpen(true);
   };
 
-  const handleDeleteAccount = () => {
+  const handleDeleteAccount = async () => {
     if (!deletingAccountId) return;
     const accountToDelete = accounts.find(acc => acc.id === deletingAccountId);
-    setAccounts(accounts.filter(acc => acc.id !== deletingAccountId));
-    toast({ title: "Success", description: `Account "${accountToDelete?.name}" deleted.`, variant: "destructive" });
-    setIsDeleteConfirmOpen(false);
-    setDeletingAccountId(null);
+    try {
+      await deleteAccount(deletingAccountId);
+      setAccounts(accounts.filter(acc => acc.id !== deletingAccountId));
+      toast({ title: "Success", description: `Account "${accountToDelete?.name}" deleted.`, variant: "destructive" });
+      setIsDeleteConfirmOpen(false);
+      setDeletingAccountId(null);
+    } catch (e) {
+       toast({ title: "Error", description: (e as Error).message || "Failed to delete account.", variant: "destructive" });
+    }
   };
   
   const resetAddAccountForm = () => {
     setNewAccountName('');
     setNewAccountType('');
     setNewInitialBalance('');
+    setNewAccountCurrency('USD');
   }
 
   const resetEditAccountForm = () => {
+    setEditingAccount(null);
     setEditedAccountName('');
     setEditedAccountBalance('');
-    setEditingAccount(null);
+    setEditedAccountCurrency('USD');
   }
 
+  if (isLoading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <Loader2 className="h-12 w-12 animate-spin text-primary" />
+        <p className="ml-4 text-lg">Loading accounts...</p>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <Card className="text-center py-10 border-destructive">
+        <CardHeader>
+          <AlertCircle className="mx-auto h-12 w-12 text-destructive" />
+          <CardTitle className="mt-4 text-destructive">Error Loading Accounts</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <CardDescription className="text-destructive-foreground">{error}</CardDescription>
+        </CardContent>
+        <CardFooter className="justify-center">
+          <Button onClick={fetchAccounts}>
+            <PlusCircle className="mr-2 h-5 w-5" /> Try Again
+          </Button>
+        </CardFooter>
+      </Card>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -144,19 +208,13 @@ export default function AccountsPage() {
             </DialogHeader>
             <div className="grid gap-4 py-4">
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="account-name" className="text-right">
-                  Name
-                </Label>
+                <Label htmlFor="account-name" className="text-right">Name</Label>
                 <Input id="account-name" value={newAccountName} onChange={(e) => setNewAccountName(e.target.value)} className="col-span-3" placeholder="e.g., My Checking Account" />
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="account-type" className="text-right">
-                  Type
-                </Label>
+                <Label htmlFor="account-type" className="text-right">Type</Label>
                 <Select onValueChange={(value) => setNewAccountType(value as AccountType)} value={newAccountType}>
-                  <SelectTrigger className="col-span-3">
-                    <SelectValue placeholder="Select account type" />
-                  </SelectTrigger>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select account type" /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="debit">Debit / Checking</SelectItem>
                     <SelectItem value="credit">Credit Card</SelectItem>
@@ -166,16 +224,21 @@ export default function AccountsPage() {
                 </Select>
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
-                <Label htmlFor="initial-balance" className="text-right">
-                  Balance
-                </Label>
+                <Label htmlFor="initial-balance" className="text-right">Balance</Label>
                 <Input id="initial-balance" type="number" value={newInitialBalance} onChange={(e) => setNewInitialBalance(e.target.value)} className="col-span-3" placeholder="e.g., 1000.00 (optional)" />
+              </div>
+              <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="account-currency" className="text-right">Currency</Label>
+                <Select onValueChange={(value) => setNewAccountCurrency(value)} value={newAccountCurrency}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select currency" /></SelectTrigger>
+                  <SelectContent>
+                    {supportedCurrencies.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <DialogFooter>
-              <DialogClose asChild>
-                <Button type="button" variant="outline">Cancel</Button>
-              </DialogClose>
+              <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
               <Button type="submit" onClick={handleAddAccount}>Add Account</Button>
             </DialogFooter>
           </DialogContent>
@@ -237,7 +300,6 @@ export default function AccountsPage() {
         </div>
       )}
 
-      {/* Edit Account Dialog */}
       <Dialog open={isEditAccountDialogOpen} onOpenChange={(isOpen) => { setIsEditAccountDialogOpen(isOpen); if(!isOpen) resetEditAccountForm(); }}>
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
@@ -248,41 +310,41 @@ export default function AccountsPage() {
           </DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="edit-account-name" className="text-right">
-                Name
-              </Label>
+              <Label htmlFor="edit-account-name" className="text-right">Name</Label>
               <Input id="edit-account-name" value={editedAccountName} onChange={(e) => setEditedAccountName(e.target.value)} className="col-span-3" />
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="edit-account-type" className="text-right">
-                Type
-              </Label>
+              <Label htmlFor="edit-account-type" className="text-right">Type</Label>
               <Input id="edit-account-type" value={editingAccount?.type || ''} className="col-span-3 capitalize" disabled />
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
-              <Label htmlFor="edit-account-balance" className="text-right">
-                Balance
-              </Label>
+              <Label htmlFor="edit-account-balance" className="text-right">Balance</Label>
               <Input id="edit-account-balance" type="number" value={editedAccountBalance} onChange={(e) => setEditedAccountBalance(e.target.value)} className="col-span-3" />
             </div>
+            <div className="grid grid-cols-4 items-center gap-4">
+                <Label htmlFor="edit-account-currency" className="text-right">Currency</Label>
+                <Select onValueChange={(value) => setEditedAccountCurrency(value)} value={editedAccountCurrency}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select currency" /></SelectTrigger>
+                  <SelectContent>
+                    {supportedCurrencies.map(c => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+              </div>
           </div>
           <DialogFooter>
-            <DialogClose asChild>
-              <Button type="button" variant="outline">Cancel</Button>
-            </DialogClose>
+            <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
             <Button type="submit" onClick={handleUpdateAccount}>Save Changes</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Account Confirmation Dialog */}
       <AlertDialog open={isDeleteConfirmOpen} onOpenChange={setIsDeleteConfirmOpen}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
             <AlertDialogDescription>
               This action will permanently delete the account "{accounts.find(acc => acc.id === deletingAccountId)?.name}". 
-              This cannot be undone and will remove all associated transactions (feature to be fully implemented).
+              This cannot be undone. Associated transactions will NOT be deleted by this action.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -296,5 +358,3 @@ export default function AccountsPage() {
     </div>
   );
 }
-
-    
