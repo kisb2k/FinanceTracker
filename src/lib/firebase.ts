@@ -11,18 +11,34 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
+// Validate essential Firebase configuration
+const essentialConfigKeys: (keyof typeof firebaseConfig)[] = ['apiKey', 'authDomain', 'projectId', 'appId'];
+const missingKeys = essentialConfigKeys.filter(key => !firebaseConfig[key]);
+
+if (missingKeys.length > 0) {
+  const message = `Firebase configuration is incomplete. Missing or undefined .env.local variables: ${missingKeys.map(k => `NEXT_PUBLIC_FIREBASE_${k.toUpperCase()}`).join(', ')}. Please verify your .env.local file and restart the development server.`;
+  console.error(message);
+  // You might want to throw an error here in a production build or a stricter setup
+  // throw new Error(message);
+}
+
 let app: FirebaseApp;
 let db: Firestore;
 
 if (getApps().length === 0) {
-  app = initializeApp(firebaseConfig);
-  // The call to createAccountTable() has been removed from here
-  // as it was causing a circular dependency.
-  // accountService.ts now handles ensuring the table exists within its own functions.
+  if (firebaseConfig.projectId) { // Initialize only if projectId is available
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app);
+  } else {
+    console.error("Firebase projectId is missing. Firebase will not be initialized.");
+    // @ts-ignore
+    app = null; // Ensure app and db are in a defined state if initialization fails
+    // @ts-ignore
+    db = null;
+  }
 } else {
   app = getApps()[0];
+  db = getFirestore(app);
 }
-
-db = getFirestore(app);
 
 export { db, app };
