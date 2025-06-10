@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useState, useMemo } from 'react';
@@ -36,7 +37,7 @@ const categories: Category[] = [
 ];
 
 export default function TransactionsPage() {
-  const [transactions, setTransactions]_ = useState<Transaction[]>(initialTransactions);
+  const [transactions, setTransactions] = useState<Transaction[]>(initialTransactions);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedAccount, setSelectedAccount] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
@@ -211,3 +212,5 @@ export default function TransactionsPage() {
 //     </Dialog>
 //   )
 // }
+
+    
