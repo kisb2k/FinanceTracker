@@ -8,7 +8,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, Copy, Tag, Search, CheckCircle, XCircle } from "lucide-react";
+import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, Copy, Tag, Search } from "lucide-react";
 import type { Transaction, Account, Category } from '@/lib/types';
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
@@ -188,29 +188,6 @@ export default function TransactionsPage() {
       <div className="mt-4 flex justify-end">
         {/* Add pagination if needed */}
       </div>
-
-      {/* Modal for adding categories, triggered from transaction actions or a general button */}
-      {/* Example: <AddCategoryDialog open={isAddCategoryOpen} onOpenChange={setIsAddCategoryOpen} /> */}
     </div>
   );
 }
-
-// Basic AddCategoryDialog (can be moved to its own file)
-// import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-// import { Input } from "@/components/ui/input";
-// import { Label } from "@/components/ui/label";
-// interface AddCategoryDialogProps { open: boolean; onOpenChange: (open: boolean) => void;}
-// function AddCategoryDialog({open, onOpenChange}: AddCategoryDialogProps) {
-//   return (
-//     <Dialog open={open} onOpenChange={onOpenChange}>
-//       <DialogContent>
-//         <DialogHeader><DialogTitle>Add New Category</DialogTitle></DialogHeader>
-//         <Label htmlFor="category-name">Category Name</Label>
-//         <Input id="category-name" />
-//         <DialogFooter><Button>Save Category</Button></DialogFooter>
-//       </DialogContent>
-//     </Dialog>
-//   )
-// }
-
-    
