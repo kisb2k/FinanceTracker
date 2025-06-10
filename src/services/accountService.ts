@@ -11,7 +11,8 @@ import {
   updateDoc,
   deleteDoc,
   query,
-  orderBy
+  orderBy,
+  getDoc
 } from 'firebase/firestore';
 
 const ACCOUNTS_COLLECTION = 'accounts';
@@ -37,7 +38,6 @@ export async function getAccounts(): Promise<Account[]> {
     if (error instanceof Error) {
         console.error("[AccountService] Firestore Error Name (getAccounts): ", error.name);
         console.error("[AccountService] Firestore Error Message (getAccounts): ", error.message);
-        // More detailed Firestore error properties if available
         // @ts-ignore
         if (error.code) console.error("[AccountService] Firestore Error Code (getAccounts): ", error.code);
     }
@@ -55,17 +55,25 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
   }
   try {
     const balance = accountData.initialBalance || 0;
+    // Construct the payload for Firestore.
+    // lastImported is intentionally omitted here. Since it's optional in the Account type,
+    // it will not be included in the object sent to Firestore if its value would be undefined.
+    // If you wanted to explicitly set it to null on creation, you'd use: lastImported: null,
     const newAccountPayload: Omit<Account, 'id'> = {
       name: accountData.name,
       type: accountData.type,
       currency: accountData.currency,
       balance: accountData.type === 'credit' ? -Math.abs(balance) : Math.abs(balance),
-      lastImported: undefined, // Or new Date().toISOString() if you want to set it on creation
+      // lastImported is not set here, so it will be omitted from the object sent to Firestore.
     };
-    console.log('[AccountService] Payload to be added:', newAccountPayload);
+    console.log('[AccountService] Payload to be added to Firestore:', newAccountPayload);
     const docRef = await addDoc(collection(db, ACCOUNTS_COLLECTION), newAccountPayload);
     console.log('[AccountService] Account added successfully to Firestore with ID:', docRef.id);
-    return { id: docRef.id, ...newAccountPayload };
+    
+    // Construct the object to return to the client, ensuring it matches the Account type.
+    // Since newAccountPayload doesn't include lastImported if it was undefined,
+    // the spread operator will correctly result in an object where lastImported is optional.
+    return { id: docRef.id, ...newAccountPayload } as Account;
   } catch (error) {
     console.error(`[AccountService] Error adding account "${accountData.name}" to Firestore: `, error);
     if (error instanceof Error) {
@@ -74,16 +82,19 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
         // @ts-ignore
         if (error.code) console.error("[AccountService] Firestore Error Code (addAccount): ", error.code);
     }
-    // Provide a more specific error message based on common Firestore error codes
     // @ts-ignore
     if (error.code === 'permission-denied') {
       throw new Error(`Failed to add account "${accountData.name}": Permission denied. Check your Firestore security rules.`);
+    }
+    // @ts-ignore
+    if (error.message && error.message.includes("invalid data") && error.message.includes("Unsupported field value: undefined")) {
+       throw new Error(`Failed to add account "${accountData.name}" due to an undefined field value. Please check payload. Details: ${(error as Error).message}`);
     }
     throw new Error(`Failed to add account "${accountData.name}" to Firestore. Check server logs and Firestore security rules. Details: ${(error as Error).message}`);
   }
 }
 
-export type UpdateAccountData = Partial<Omit<Account, 'id' | 'type'>>; // type cannot be changed after creation for simplicity
+export type UpdateAccountData = Partial<Omit<Account, 'id' | 'type'>>;
 
 export async function updateAccount(accountId: string, updates: UpdateAccountData): Promise<Account> {
    console.log(`[AccountService] Attempting to update account ${accountId} with:`, updates);
@@ -94,26 +105,17 @@ export async function updateAccount(accountId: string, updates: UpdateAccountDat
    try {
     const accountRef = doc(db, ACCOUNTS_COLLECTION, accountId);
     
-    // Ensure balance is handled correctly if it's part of updates
-    // This logic assumes 'type' is not changing. If it could, this would be more complex.
-    // For now, 'type' is not part of UpdateAccountData.
-    if (updates.balance !== undefined) {
-        // To correctly update balance, we might need the account's type.
-        // Fetching the account type first or ensuring client sends appropriate sign.
-        // For simplicity, let's assume client sends balance with correct sign or service needs to fetch type.
-        // The current accounts page sends balance as an absolute number and expects the service to handle the sign.
-        // This requires fetching the account or trusting the client which is not ideal.
-        // Let's keep it as is for now, meaning updateAccount expects balance with correct sign if provided.
-    }
-
+    // Firestore's updateDoc handles undefined values in the 'updates' object by ignoring them,
+    // which is usually the desired behavior for partial updates.
     await updateDoc(accountRef, updates);
     console.log(`[AccountService] Account ${accountId} updated successfully in Firestore.`);
     
-    // To return the full, updated account, you'd fetch the document again:
-    // const updatedDoc = await getDoc(accountRef);
-    // return { id: updatedDoc.id, ...updatedDoc.data() } as Account;
-    // For now, returning a merged object for simplicity (might not reflect server-generated fields like timestamps)
-    return { id: accountId, ...updates } as Account; 
+    // Fetch the updated document to return the complete and current state.
+    const updatedDoc = await getDoc(accountRef);
+    if (!updatedDoc.exists()) {
+        throw new Error(`Account with ID ${accountId} not found after update.`);
+    }
+    return { id: updatedDoc.id, ...updatedDoc.data() } as Account;
   } catch (error) {
     console.error(`[AccountService] Error updating account ${accountId} in Firestore: `, error);
     if (error instanceof Error) {
@@ -154,21 +156,5 @@ export async function deleteAccount(accountId: string): Promise<void> {
       throw new Error(`Failed to delete account ${accountId}: Permission denied. Check your Firestore security rules.`);
     }
     throw new Error(`Failed to delete account ${accountId} from Firestore. Check server logs. Details: ${(error as Error).message}`);
-  }
-}
-
-// This function isn't strictly needed as Firestore creates collections on first document write.
-// Kept for reference or if pre-warming a collection path is ever desired (rare).
-export async function createAccountTable(): Promise<void> {
-  try {
-    if (!db) {
-      console.warn("[AccountService] Firestore db instance is not available for createAccountTable. Skipping path check. This usually means Firebase isn't initialized.");
-      return;
-    }
-    // This doesn't "create" a table but can be used to check if the path is referencable.
-    // collection(db, ACCOUNTS_COLLECTION); 
-    // console.log("[AccountService] Ensured 'accounts' collection path is valid (actual collection created on first write).");
-  } catch (error) {
-    console.error("[AccountService] Error during attempt to reference accounts collection path:", error);
   }
 }
