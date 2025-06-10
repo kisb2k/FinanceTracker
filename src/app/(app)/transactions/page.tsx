@@ -49,7 +49,7 @@ export default function TransactionsPage() {
       const matchesCategory = selectedCategory === 'all' || tx.category === categories.find(c => c.id === selectedCategory)?.name;
       return matchesSearch && matchesAccount && matchesCategory;
     });
-  }, [transactions, searchTerm, selectedAccount, selectedCategory]);
+  }, [transactions, searchTerm, selectedAccount, selectedCategory, categories]);
 
   const getAccountName = (accountId: string) => accounts.find(acc => acc.id === accountId)?.name || 'Unknown Account';
 
@@ -142,7 +142,7 @@ export default function TransactionsPage() {
                   <TableCell className="font-medium max-w-xs truncate" title={tx.description}>{tx.description}</TableCell>
                   <TableCell>{getAccountName(tx.accountId)}</TableCell>
                   <TableCell>
-                    <Badge variant={tx.category === 'Uncategorized' ? "destructive" : "secondary"}>
+                    <Badge variant={tx.category === 'Uncategorized' || !tx.category ? "destructive" : "secondary"}>
                       {tx.category || 'Uncategorized'}
                     </Badge>
                   </TableCell>
