@@ -11,14 +11,15 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogClose } from "@/components/ui/dialog";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
-import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, Copy, Tag, Search, Loader2, AlertCircle, FolderPlus, Settings2 } from "lucide-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { PlusCircle, Upload, Filter, MoreHorizontal, Trash2, Edit3, FolderPlus, Settings2, Search, Loader2, AlertCircle, ListChecks, ListX, FileEdit } from "lucide-react";
 import type { Transaction, Account, Category } from '@/lib/types';
 import Link from 'next/link';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { getAccounts } from '@/services/accountService';
 import { getCategories, addCategory, deleteCategory as deleteCategoryService } from '@/services/categoryService';
-import { getTransactions, addTransaction, updateTransaction, deleteTransaction as deleteTransactionService } from '@/services/transactionService';
+import { getTransactions, addTransaction, updateTransaction, deleteTransaction as deleteTransactionService, deleteMultipleTransactions, updateMultipleTransactions, type BulkUpdateTransactionData } from '@/services/transactionService';
 import { format } from 'date-fns';
 
 interface EditFormState {
@@ -27,7 +28,7 @@ interface EditFormState {
   date: string;
   description: string;
   amount: string;
-  category: string; // Stores category NAME for select, or new name
+  category: string; 
 }
 
 const defaultAddTransactionData = {
@@ -35,7 +36,7 @@ const defaultAddTransactionData = {
   date: format(new Date(), 'yyyy-MM-dd'),
   description: '',
   amount: '',
-  category: '', // Store category NAME
+  category: '', 
 };
 
 export default function TransactionsPage() {
@@ -44,6 +45,7 @@ export default function TransactionsPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   
   const [isLoading, setIsLoading] = useState(true);
+  const [isProcessingBulkAction, setIsProcessingBulkAction] = useState(false);
   const [pageError, setPageError] = useState<string | null>(null);
 
   const [searchTerm, setSearchTerm] = useState('');
@@ -63,6 +65,11 @@ export default function TransactionsPage() {
   const [isManageCategoriesDialogOpen, setIsManageCategoriesDialogOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState('');
   const [isDeletingCategory, setIsDeletingCategory] = useState<Category | null>(null);
+
+  const [selectedTransactionIds, setSelectedTransactionIds] = useState<string[]>([]);
+  const [isBulkDeleteConfirmOpen, setIsBulkDeleteConfirmOpen] = useState(false);
+  const [isBulkUpdateDialogOpen, setIsBulkUpdateDialogOpen] = useState(false);
+  const [bulkUpdateCategory, setBulkUpdateCategory] = useState<string>('');
 
 
   const { toast } = useToast();
@@ -101,7 +108,7 @@ export default function TransactionsPage() {
         date: editingTransaction.date ? format(new Date(editingTransaction.date), 'yyyy-MM-dd') : '',
         description: editingTransaction.description,
         amount: String(editingTransaction.amount),
-        category: editingTransaction.category || '', // Use category name
+        category: editingTransaction.category || '',
       });
     }
   }, [editingTransaction]);
@@ -117,7 +124,7 @@ export default function TransactionsPage() {
       const matchesAccount = selectedAccountFilter === 'all' || tx.accountId === selectedAccountFilter;
       const matchesCategory = selectedCategoryFilter === 'all' || tx.category === categories.find(c => c.id === selectedCategoryFilter)?.name;
       return matchesSearch && matchesAccount && matchesCategory;
-    });
+    }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
   }, [transactions, searchTerm, selectedAccountFilter, selectedCategoryFilter, accounts, categories]);
 
   const getAccountName = (accountId: string) => accounts.find(acc => acc.id === accountId)?.name || 'Unknown Account';
@@ -132,7 +139,8 @@ export default function TransactionsPage() {
   };
 
   const handleAddTransactionSubmit = async () => {
-    const amountValue = parseFloat(newTransactionData.amount);
+    // ... (existing implementation)
+     const amountValue = parseFloat(newTransactionData.amount);
     if (!newTransactionData.accountId || !newTransactionData.date || !newTransactionData.description || isNaN(amountValue) || !newTransactionData.category) {
       toast({ title: "Validation Error", description: "Please fill all fields: Account, Date, Description, valid Amount, and Category.", variant: "destructive" });
       return;
@@ -169,6 +177,7 @@ export default function TransactionsPage() {
   };
 
   const handleEditTransactionSubmit = async () => {
+    // ... (existing implementation)
     if (!editingTransaction) return;
 
     const amountValue = parseFloat(editFormState.amount);
@@ -200,7 +209,8 @@ export default function TransactionsPage() {
   };
 
   const handleDeleteTransactionConfirm = async () => {
-    if (!deletingTransactionId) return;
+    // ... (existing implementation)
+     if (!deletingTransactionId) return;
     const txToDelete = transactions.find(tx => tx.id === deletingTransactionId);
     try {
       await deleteTransactionService(deletingTransactionId);
@@ -213,7 +223,7 @@ export default function TransactionsPage() {
     }
   };
 
-  const handleAddCategorySubmit = async () => {
+  const handleAddCategorySubmit = async () => { /* ... existing ... */ 
     if (!newCategoryName.trim()) {
       toast({ title: "Validation Error", description: "Category name cannot be empty.", variant: "destructive" });
       return;
@@ -227,12 +237,10 @@ export default function TransactionsPage() {
       toast({ title: "Error Adding Category", description: (e as Error).message, variant: "destructive" });
     }
   };
-
-  const handleDeleteCategoryConfirm = async () => {
+  const handleDeleteCategoryConfirm = async () => { /* ... existing ... */ 
     if (!isDeletingCategory) return;
     try {
       await deleteCategoryService(isDeletingCategory.id);
-      // Optimistically remove from UI, also remove from category filter if it was selected
       if (selectedCategoryFilter === isDeletingCategory.id) {
         setSelectedCategoryFilter('all');
       }
@@ -247,9 +255,74 @@ export default function TransactionsPage() {
   const resetAddTransactionDialog = () => setNewTransactionData(defaultAddTransactionData);
   const resetEditTransactionDialog = () => setEditingTransaction(null);
 
+  // Bulk Action Handlers
+  const handleSelectAllTransactions = (checked: boolean) => {
+    if (checked) {
+      setSelectedTransactionIds(filteredTransactions.map(tx => tx.id));
+    } else {
+      setSelectedTransactionIds([]);
+    }
+  };
 
-  if (isLoading) {
-    return (
+  const handleSelectTransaction = (transactionId: string, checked: boolean) => {
+    setSelectedTransactionIds(prev => 
+      checked ? [...prev, transactionId] : prev.filter(id => id !== transactionId)
+    );
+  };
+  
+  const handleBulkDelete = async () => {
+    if (selectedTransactionIds.length === 0) return;
+    setIsProcessingBulkAction(true);
+    try {
+      await deleteMultipleTransactions(selectedTransactionIds);
+      setTransactions(prev => prev.filter(tx => !selectedTransactionIds.includes(tx.id)));
+      toast({ title: "Bulk Delete Successful", description: `${selectedTransactionIds.length} transactions deleted.`});
+      setSelectedTransactionIds([]);
+    } catch (e) {
+      toast({ title: "Bulk Delete Failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setIsProcessingBulkAction(false);
+      setIsBulkDeleteConfirmOpen(false);
+    }
+  };
+
+  const handleOpenBulkUpdateDialog = () => {
+    if (categories.length === 0) {
+        toast({title: "Cannot Bulk Edit", description: "Please add categories first via 'Manage Categories'.", variant: "destructive"});
+        return;
+    }
+    setBulkUpdateCategory(''); // Reset selection
+    setIsBulkUpdateDialogOpen(true);
+  };
+
+  const handleBulkUpdate = async () => {
+    if (selectedTransactionIds.length === 0 || !bulkUpdateCategory) {
+      toast({title: "Bulk Update Error", description: "No transactions selected or no category chosen for update.", variant: "destructive" });
+      return;
+    }
+    setIsProcessingBulkAction(true);
+    const updates: BulkUpdateTransactionData = { category: bulkUpdateCategory };
+    try {
+      await updateMultipleTransactions(selectedTransactionIds, updates);
+      setTransactions(prev => 
+        prev.map(tx => 
+          selectedTransactionIds.includes(tx.id) ? { ...tx, category: bulkUpdateCategory, updatedAt: new Date().toISOString() } : tx
+        ).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+      );
+      toast({ title: "Bulk Update Successful", description: `${selectedTransactionIds.length} transactions updated to category "${bulkUpdateCategory}".`});
+      setSelectedTransactionIds([]);
+      setBulkUpdateCategory('');
+    } catch (e) {
+      toast({ title: "Bulk Update Failed", description: (e as Error).message, variant: "destructive" });
+    } finally {
+      setIsProcessingBulkAction(false);
+      setIsBulkUpdateDialogOpen(false);
+    }
+  };
+
+
+  if (isLoading) { /* ... existing ... */ 
+     return (
       <div className="flex justify-center items-center h-64">
         <Loader2 className="h-12 w-12 animate-spin text-primary" />
         <p className="ml-4 text-lg">Loading transactions data...</p>
@@ -257,7 +330,7 @@ export default function TransactionsPage() {
     );
   }
 
-  if (pageError) {
+  if (pageError) { /* ... existing ... */
     return (
       <Card className="text-center py-10 border-destructive">
         <CardHeader>
@@ -269,12 +342,15 @@ export default function TransactionsPage() {
         </CardContent>
         <CardFooter className="justify-center">
           <Button onClick={fetchPageData}>
-            <PlusCircle className="mr-2 h-5 w-5" /> Try Again
+            <FolderPlus className="mr-2 h-5 w-5" /> Try Again
           </Button>
         </CardFooter>
       </Card>
     );
   }
+
+  const isAllFilteredSelected = filteredTransactions.length > 0 && selectedTransactionIds.length === filteredTransactions.length;
+
 
   return (
     <div className="flex flex-col gap-6">
@@ -302,6 +378,29 @@ export default function TransactionsPage() {
         )}
       </div>
 
+      {/* Bulk Actions Bar */}
+      {selectedTransactionIds.length > 0 && (
+        <Card className="shadow-md bg-secondary border-primary/50">
+          <CardContent className="p-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-medium">{selectedTransactionIds.length} transaction(s) selected.</p>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={handleOpenBulkUpdateDialog} disabled={isProcessingBulkAction || categories.length === 0}>
+                {isProcessingBulkAction ? <Loader2 className="animate-spin" /> : <FileEdit />}
+                Bulk Edit Category
+              </Button>
+              <Button variant="destructive" size="sm" onClick={() => setIsBulkDeleteConfirmOpen(true)} disabled={isProcessingBulkAction}>
+                {isProcessingBulkAction ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                Delete Selected
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setSelectedTransactionIds([])} disabled={isProcessingBulkAction}>
+                 <ListX /> Clear Selection
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+
       <Card className="shadow-lg">
         <CardHeader>
           <CardTitle>Filter & Search</CardTitle>
@@ -309,7 +408,7 @@ export default function TransactionsPage() {
             <div className="relative">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search descriptions, categories, accounts..."
+                placeholder="Search descriptions, categories..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="pl-8"
@@ -322,7 +421,7 @@ export default function TransactionsPage() {
                 {accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Select value={selectedCategoryFilter} onValueChange={setSelectedCategoryFilter} disabled={categories.length === 0}>
+            <Select value={selectedCategoryFilter} onValueChange={(value) => setSelectedCategoryFilter(categories.find(c => c.name === value)?.id || 'all')} disabled={categories.length === 0}>
               <SelectTrigger><SelectValue placeholder="Filter by Category" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
@@ -338,6 +437,15 @@ export default function TransactionsPage() {
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-[50px]">
+                  <Checkbox 
+                    id="select-all-transactions"
+                    checked={isAllFilteredSelected}
+                    onCheckedChange={(checked) => handleSelectAllTransactions(Boolean(checked))}
+                    aria-label="Select all transactions in current view"
+                    disabled={filteredTransactions.length === 0}
+                  />
+                </TableHead>
                 <TableHead>Date</TableHead>
                 <TableHead>Description</TableHead>
                 <TableHead>Account</TableHead>
@@ -349,7 +457,15 @@ export default function TransactionsPage() {
             </TableHeader>
             <TableBody>
               {filteredTransactions.length > 0 ? filteredTransactions.map((tx) => (
-                <TableRow key={tx.id} className="hover:bg-muted/50 transition-colors">
+                <TableRow key={tx.id} className={`hover:bg-muted/50 transition-colors ${selectedTransactionIds.includes(tx.id) ? 'bg-primary/10' : ''}`} data-state={selectedTransactionIds.includes(tx.id) ? 'selected' : ''}>
+                  <TableCell>
+                    <Checkbox 
+                        id={`select-tx-${tx.id}`}
+                        checked={selectedTransactionIds.includes(tx.id)}
+                        onCheckedChange={(checked) => handleSelectTransaction(tx.id, Boolean(checked))}
+                        aria-label={`Select transaction ${tx.description}`}
+                    />
+                  </TableCell>
                   <TableCell>{tx.date ? format(new Date(tx.date), 'MM/dd/yyyy') : 'N/A'}</TableCell>
                   <TableCell className="font-medium max-w-xs truncate" title={tx.description}>{tx.description}</TableCell>
                   <TableCell>{getAccountName(tx.accountId)}</TableCell>
@@ -361,10 +477,10 @@ export default function TransactionsPage() {
                   <TableCell className={`text-right font-semibold ${tx.amount >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                     {tx.amount >= 0 ? '+' : '-'}${Math.abs(tx.amount).toFixed(2)}
                   </TableCell>
-                  <TableCell>
+                   <TableCell>
                     {tx.isDebit ? 
-                      <Badge variant="outline" className="text-red-600 border-red-600/50">Debit</Badge> : 
-                      <Badge variant="outline" className="text-green-600 border-green-600/50">Credit</Badge>
+                      <Badge variant="outline" className="border-red-500/50 text-red-600 dark:border-red-400/50 dark:text-red-400">Debit</Badge> : 
+                      <Badge variant="outline" className="border-green-500/50 text-green-600 dark:border-green-400/50 dark:text-green-400">Credit</Badge>
                     }
                   </TableCell>
                   <TableCell className="text-center">
@@ -382,8 +498,8 @@ export default function TransactionsPage() {
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={7} className="h-24 text-center">
-                    {isLoading ? 'Loading transactions...' : 'No transactions found. Try adjusting your filters or add a new transaction.'}
+                  <TableCell colSpan={8} className="h-24 text-center">
+                    {isLoading || isProcessingBulkAction ? 'Loading transactions...' : 'No transactions found. Try adjusting your filters or add a new transaction.'}
                   </TableCell>
                 </TableRow>
               )}
@@ -493,6 +609,50 @@ export default function TransactionsPage() {
         </AlertDialogContent>
       </AlertDialog>
 
+      {/* Bulk Delete Confirmation Dialog */}
+      <AlertDialog open={isBulkDeleteConfirmOpen} onOpenChange={setIsBulkDeleteConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>Confirm Bulk Delete</AlertDialogTitle>
+            <AlertDialogDescription>Are you sure you want to delete {selectedTransactionIds.length} selected transaction(s)? This action cannot be undone.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setIsBulkDeleteConfirmOpen(false)}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleBulkDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90" disabled={isProcessingBulkAction}>
+              {isProcessingBulkAction ? <Loader2 className="animate-spin mr-2"/> : null} Delete Selected
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Bulk Update Category Dialog */}
+        <Dialog open={isBulkUpdateDialogOpen} onOpenChange={(isOpen) => { setIsBulkUpdateDialogOpen(isOpen); if(!isOpen) setBulkUpdateCategory(''); }}>
+            <DialogContent>
+                <DialogHeader>
+                    <DialogTitle>Bulk Update Transaction Category</DialogTitle>
+                    <DialogDescription>Select a new category for the {selectedTransactionIds.length} selected transaction(s).</DialogDescription>
+                </DialogHeader>
+                <div className="py-4">
+                    <Label htmlFor="bulk-update-category">New Category</Label>
+                    <Select value={bulkUpdateCategory} onValueChange={setBulkUpdateCategory}>
+                        <SelectTrigger id="bulk-update-category">
+                            <SelectValue placeholder="Select a category" />
+                        </SelectTrigger>
+                        <SelectContent>
+                            {categories.map(cat => (
+                                <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                </div>
+                <DialogFooter>
+                    <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
+                    <Button onClick={handleBulkUpdate} disabled={isProcessingBulkAction || !bulkUpdateCategory}>
+                         {isProcessingBulkAction ? <Loader2 className="animate-spin mr-2"/> : null} Update Category
+                    </Button>
+                </DialogFooter>
+            </DialogContent>
+        </Dialog>
+
        {/* Manage Categories Dialog */}
       <Dialog open={isManageCategoriesDialogOpen} onOpenChange={setIsManageCategoriesDialogOpen}>
         <DialogContent className="sm:max-w-md">
@@ -535,3 +695,4 @@ export default function TransactionsPage() {
     </div>
   );
 }
+

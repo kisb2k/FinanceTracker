@@ -1,6 +1,7 @@
+
 'use client';
 
-import { useState, ChangeEvent, FormEvent } from 'react';
+import { useState, ChangeEvent, FormEvent, useEffect } from 'react';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -10,15 +11,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight } from "lucide-react";
 import type { Account } from '@/lib/types';
-import { mapCsvColumns, type MapCsvColumnsOutput } from '@/ai/flows/map-csv-columns'; // Assuming this path
+import { mapCsvColumns, type MapCsvColumnsOutput } from '@/ai/flows/map-csv-columns';
 import { Progress } from '@/components/ui/progress';
-
-// Placeholder data
-const accounts: Account[] = [
-  { id: '1', name: 'Chase Checking', type: 'debit', balance: 0, currency: 'USD' },
-  { id: '2', name: 'Amex Gold', type: 'credit', balance: 0, currency: 'USD' },
-  { id: '3', name: 'Bank of America Savings', type: 'savings', balance: 0, currency: 'USD'},
-];
+import { getAccounts } from '@/services/accountService';
+import { useToast } from '@/hooks/use-toast';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 
@@ -29,6 +25,10 @@ interface CsvRow {
 }
 
 export default function ImportTransactionsPage() {
+  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [isAccountsLoading, setIsAccountsLoading] = useState(true);
+  const [accountsError, setAccountsError] = useState<string | null>(null);
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
@@ -40,6 +40,25 @@ export default function ImportTransactionsPage() {
   const [csvPreview, setCsvPreview] = useState<CsvRow[]>([]);
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
   const [progressValue, setProgressValue] = useState(0);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    const fetchAccountsForImport = async () => {
+      setIsAccountsLoading(true);
+      setAccountsError(null);
+      try {
+        const fetchedAccounts = await getAccounts();
+        setAccounts(fetchedAccounts);
+      } catch (e) {
+        const errorMsg = (e as Error).message || "Failed to load accounts for import.";
+        setAccountsError(errorMsg);
+        toast({ title: "Error Loading Accounts", description: errorMsg, variant: "destructive" });
+      } finally {
+        setIsAccountsLoading(false);
+      }
+    };
+    fetchAccountsForImport();
+  }, [toast]);
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
@@ -58,11 +77,11 @@ export default function ImportTransactionsPage() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      const lines = text.split('\n').slice(0, 6); // Headers + 5 preview rows
+      const lines = text.split(/\\r\\n|\\n|\\r/).slice(0, 6); // Handle different line endings
       if (lines.length > 0) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
         setCsvHeaders(headers);
-        const previewData = lines.slice(1).map(line => {
+        const previewData = lines.slice(1).filter(line => line.trim() !== '').map(line => {
           const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
           return headers.reduce((obj, header, index) => {
             obj[header] = values[index] || '';
@@ -84,44 +103,39 @@ export default function ImportTransactionsPage() {
     setError(null);
     setProgressValue(10);
 
-    parseCsvPreview(selectedFile); // Parse for preview and headers
+    parseCsvPreview(selectedFile); 
     
-    // Simulate AI mapping
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
-        const csvData = e.target?.result as string;
+        const csvDataContent = e.target?.result as string;
         setProgressValue(30);
-        // Call Genkit flow
-        // For now, using a placeholder response. Replace with actual AI call.
-        // const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData });
-        // setColumnMap(aiResult.columnMap);
-        
-        // Placeholder mapping logic
-        const placeholderMap: Record<string, string> = {};
-        csvHeaders.forEach(header => {
-            const lowerHeader = header.toLowerCase();
-            if (lowerHeader.includes('date')) placeholderMap[header] = 'date';
-            else if (lowerHeader.includes('desc') || lowerHeader.includes('narrative')) placeholderMap[header] = 'description';
-            else if (lowerHeader.includes('amount') || lowerHeader.includes('value')) placeholderMap[header] = 'amount';
-            else if (lowerHeader.includes('category') || lowerHeader.includes('type')) placeholderMap[header] = 'category';
-            else placeholderMap[header] = ''; // Unmapped
-        });
-        setColumnMap(placeholderMap);
+        try {
+            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent });
+            setColumnMap(aiResult.columnMap);
+            toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
+        } catch (aiMapError) {
+            console.error("AI Mapping Error:", aiMapError);
+            setError('AI column mapping failed. Please map columns manually or verify CSV format.');
+            toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
+            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {});
+            setColumnMap(fallbackMap);
+        }
         setProgressValue(50);
         setImportStep('map_columns');
         setIsLoading(false);
       };
+      reader.onerror = () => {
+        setError("Failed to read the selected file.");
+        setIsLoading(false);
+        setProgressValue(0);
+      };
       reader.readAsText(selectedFile);
-    } catch (aiError) {
-      console.error("AI Mapping Error:", aiError);
-      setError('AI column mapping failed. Please map columns manually.');
-      // Fallback to manual mapping setup
-      const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {});
-      setColumnMap(fallbackMap);
-      setProgressValue(50);
-      setImportStep('map_columns');
+    } catch (fileReadError) {
+      console.error("File Reading Error:", fileReadError);
+      setError('Error processing the file. Please try again.');
       setIsLoading(false);
+      setProgressValue(0);
     }
   };
 
@@ -135,27 +149,35 @@ export default function ImportTransactionsPage() {
       setError('File, account, and column mappings are required.');
       return;
     }
+     const mappedFieldsPresent = expectedTransactionFields.every(field => 
+      Object.values(columnMap).includes(field)
+    );
+    if (!mappedFieldsPresent && !Object.values(columnMap).some(val => val !== '')) {
+       setError('Please map at least one CSV column to a transaction field.');
+       return;
+    }
+
+
     setIsLoading(true);
     setError(null);
     setSuccessMessage(null);
     setProgressValue(70);
 
-    // Simulate processing and saving
-    // In a real app, you would parse the full CSV based on columnMap,
-    // transform data, detect debit/credit, save to DB.
     console.log('Importing with:', { fileName: selectedFile.name, accountId: selectedAccountId, columnMap });
     
-    await new Promise(resolve => setTimeout(resolve, 2000)); // Simulate network delay
+    await new Promise(resolve => setTimeout(resolve, 1500)); 
 
-    // Placeholder: Assume 100 transactions imported
-    const transactionsImportedCount = 100; 
-    setSuccessMessage(`${transactionsImportedCount} transactions imported successfully for account ${accounts.find(a=>a.id === selectedAccountId)?.name}.`);
-    setSelectedFile(null);
-    setSelectedAccountId('');
-    setColumnMap({});
-    setCsvHeaders([]);
-    setCsvPreview([]);
-    setImportStep('complete');
+    // Placeholder: Actual import logic to be fully implemented in a subsequent step
+    // For now, we simulate success.
+    const transactionsImportedCount = csvPreview.length > 0 ? csvPreview.length : Math.floor(Math.random() * 50) + 1;
+    const accountForImport = accounts.find(a=>a.id === selectedAccountId);
+    setSuccessMessage(`${transactionsImportedCount} transactions (previewed/simulated) would be imported for account ${accountForImport?.name}. Full import logic pending.`);
+    // setSelectedFile(null); // Keep file for potential "real" import later
+    // setSelectedAccountId(''); // Keep account for "real" import
+    // setColumnMap({});
+    // setCsvHeaders([]);
+    // setCsvPreview([]);
+    setImportStep('complete'); // Or 'review' if a review step is added
     setIsLoading(false);
     setProgressValue(100);
   };
@@ -170,12 +192,18 @@ export default function ImportTransactionsPage() {
     setCsvPreview([]);
     setColumnMap({});
     setProgressValue(0);
+    setIsLoading(false);
   };
 
 
   return (
     <div className="flex flex-col gap-6 max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold tracking-tight font-headline">Import Transactions</h1>
+      <div className="flex justify-between items-center">
+        <h1 className="text-3xl font-bold tracking-tight font-headline">Import Transactions</h1>
+        {importStep !== 'upload' && (
+            <Button variant="outline" onClick={resetForm}>Start New Import</Button>
+        )}
+      </div>
       
       {importStep !== 'complete' && <Progress value={progressValue} className="w-full mb-4" />}
 
@@ -189,7 +217,7 @@ export default function ImportTransactionsPage() {
       {successMessage && importStep === 'complete' && (
         <Alert variant="default" className="bg-green-50 border-green-200 text-green-700 dark:bg-green-900/30 dark:border-green-700 dark:text-green-400">
           <CheckCircle className="h-4 w-4 !text-green-500" />
-          <AlertTitle>Import Successful!</AlertTitle>
+          <AlertTitle>Import Process Simulated!</AlertTitle>
           <AlertDescription>{successMessage}</AlertDescription>
         </Alert>
       )}
@@ -203,16 +231,29 @@ export default function ImportTransactionsPage() {
           <CardContent className="space-y-6">
             <div className="space-y-2">
               <Label htmlFor="account-select">Account</Label>
-              <Select value={selectedAccountId} onValueChange={setSelectedAccountId}>
+              <Select 
+                value={selectedAccountId} 
+                onValueChange={setSelectedAccountId}
+                disabled={isAccountsLoading || !!accountsError || accounts.length === 0}
+              >
                 <SelectTrigger id="account-select">
-                  <SelectValue placeholder="Select an account" />
+                  <SelectValue placeholder={
+                    isAccountsLoading ? "Loading accounts..." : 
+                    accountsError ? "Error loading accounts" :
+                    accounts.length === 0 ? "No accounts available" :
+                    "Select an account"
+                  } />
                 </SelectTrigger>
                 <SelectContent>
-                  {accounts.map(acc => (
+                  {accounts.length > 0 && !isAccountsLoading && !accountsError && accounts.map(acc => (
                     <SelectItem key={acc.id} value={acc.id}>{acc.name} ({acc.type})</SelectItem>
                   ))}
+                   {accounts.length === 0 && !isAccountsLoading && !accountsError && (
+                     <div className="p-2 text-sm text-muted-foreground">No accounts found. Please add an account on the Accounts page.</div>
+                   )}
                 </SelectContent>
               </Select>
+              {accountsError && <p className="text-xs text-destructive">{accountsError}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="file-upload">CSV File</Label>
@@ -230,7 +271,10 @@ export default function ImportTransactionsPage() {
             </div>
           </CardContent>
           <CardFooter className="justify-end">
-            <Button onClick={handleProceedToMapping} disabled={!selectedFile || !selectedAccountId || isLoading}>
+            <Button 
+              onClick={handleProceedToMapping} 
+              disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!accountsError}
+            >
               {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
               Proceed to Column Mapping
             </Button>
@@ -244,7 +288,7 @@ export default function ImportTransactionsPage() {
             <CardHeader>
               <CardTitle>Step 2: Map CSV Columns</CardTitle>
               <CardDescription>
-                Match your CSV columns to the standard transaction fields. AI suggestions are pre-filled.
+                Match your CSV columns to the standard transaction fields. AI suggestions are pre-filled if successful.
                 <Wand2 className="inline ml-2 h-4 w-4 text-primary" />
               </CardDescription>
             </CardHeader>
@@ -285,7 +329,7 @@ export default function ImportTransactionsPage() {
               </div>
               {csvPreview.length > 0 && (
                 <div>
-                  <h3 className="text-md font-semibold mb-2">Data Preview (First 5 Rows)</h3>
+                  <h3 className="text-md font-semibold mb-2">Data Preview (First {csvPreview.length} Rows)</h3>
                   <div className="overflow-x-auto border rounded-md p-2 bg-muted/30 max-h-60">
                     <Table className="text-xs">
                        <TableHeader><TableRow>{csvHeaders.map(h => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
@@ -300,10 +344,10 @@ export default function ImportTransactionsPage() {
               )}
             </CardContent>
             <CardFooter className="justify-between">
-               <Button type="button" variant="outline" onClick={() => setImportStep('upload')}>Back</Button>
+               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); /* Do not fully reset form here */ }}>Back</Button>
                <Button type="submit" disabled={isLoading}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-                Confirm and Import
+                Confirm and Import (Simulated)
               </Button>
             </CardFooter>
           </form>
@@ -313,14 +357,14 @@ export default function ImportTransactionsPage() {
       {importStep === 'complete' && (
          <Card className="shadow-lg">
             <CardHeader>
-                <CardTitle>Import Process Finished</CardTitle>
+                <CardTitle>Import Process Finished (Simulation)</CardTitle>
             </CardHeader>
             <CardContent>
-                <p className="mb-4">Your transactions have been processed.</p>
+                <p className="mb-4">The import process simulation is complete.</p>
             </CardContent>
-            <CardFooter className="flex justify-between">
+            <CardFooter className="flex flex-col sm:flex-row justify-between gap-2">
                 <Button variant="outline" onClick={resetForm}>Import Another File</Button>
-                <Button asChild><a href="/transactions">View Transactions</a></Button>
+                <Button asChild><Link href="/transactions">View Transactions</Link></Button>
             </CardFooter>
          </Card>
       )}
@@ -328,3 +372,4 @@ export default function ImportTransactionsPage() {
     </div>
   );
 }
+
