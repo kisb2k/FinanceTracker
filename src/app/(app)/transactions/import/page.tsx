@@ -11,12 +11,13 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight } from "lucide-react";
 import type { Account } from '@/lib/types';
-import { mapCsvColumns, type MapCsvColumnsOutput } from '@/ai/flows/map-csv-columns';
+import { mapCsvColumns, type MapCsvColumnsOutput, type MappingEntry } from '@/ai/flows/map-csv-columns';
 import { Progress } from '@/components/ui/progress';
 import { getAccounts } from '@/services/accountService';
 import { useToast } from '@/hooks/use-toast';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
+const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
 
 type ImportStep = 'upload' | 'map_columns' | 'review' | 'complete';
 
@@ -111,10 +112,11 @@ export default function ImportTransactionsPage() {
         const csvDataContent = e.target?.result as string;
         setProgressValue(30);
         try {
-            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\r\n|\n|\r/).slice(0, 10).join('\\n') }); // Send headers + few rows
-            if (aiResult && aiResult.columnMappings) {
-              const newColumnMap = aiResult.columnMappings.reduce((acc, mapping) => {
+            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\r\n|\n|\r/).slice(0, 10).join('\\n') });
+            if (aiResult && Array.isArray(aiResult.columnMappings)) {
+              const newColumnMap = aiResult.columnMappings.reduce((acc, mapping: MappingEntry) => {
                 if (mapping.csvHeader) {
+                  // Ensure that an empty transactionField (meaning AI suggests unmapped) is stored as an empty string
                   acc[mapping.csvHeader] = mapping.transactionField || '';
                 }
                 return acc;
@@ -122,13 +124,13 @@ export default function ImportTransactionsPage() {
               setColumnMap(newColumnMap);
               toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
             } else {
-              throw new Error("AI mapping result was not in the expected format.");
+              throw new Error("AI mapping result was not in the expected format (expected an array of mappings).");
             }
         } catch (aiMapError) {
             console.error("AI Mapping Error:", aiMapError);
             setError('AI column mapping failed. Please map columns manually or verify CSV format.');
             toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
-            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {});
+            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {}); // Default to unmapped
             setColumnMap(fallbackMap);
         }
         setProgressValue(50);
@@ -150,7 +152,7 @@ export default function ImportTransactionsPage() {
   };
 
   const handleColumnMapChange = (csvHeader: string, transactionField: string) => {
-    setColumnMap(prev => ({ ...prev, [csvHeader]: transactionField }));
+    setColumnMap(prev => ({ ...prev, [csvHeader]: transactionField === UNMAPPED_PLACEHOLDER_VALUE ? "" : transactionField }));
   };
 
   const handleSubmitImport = async (event: FormEvent) => {
@@ -177,17 +179,10 @@ export default function ImportTransactionsPage() {
     
     await new Promise(resolve => setTimeout(resolve, 1500)); 
 
-    // Placeholder: Actual import logic to be fully implemented in a subsequent step
-    // For now, we simulate success.
     const transactionsImportedCount = csvPreview.length > 0 ? csvPreview.length : Math.floor(Math.random() * 50) + 1;
     const accountForImport = accounts.find(a=>a.id === selectedAccountId);
     setSuccessMessage(`${transactionsImportedCount} transactions (previewed/simulated) would be imported for account ${accountForImport?.name}. Full import logic pending.`);
-    // setSelectedFile(null); // Keep file for potential "real" import later
-    // setSelectedAccountId(''); // Keep account for "real" import
-    // setColumnMap({});
-    // setCsvHeaders([]);
-    // setCsvPreview([]);
-    setImportStep('complete'); // Or 'review' if a review step is added
+    setImportStep('complete');
     setIsLoading(false);
     setProgressValue(100);
   };
@@ -318,14 +313,14 @@ export default function ImportTransactionsPage() {
                         <TableCell className="font-medium">{header}</TableCell>
                         <TableCell>
                           <Select 
-                            value={columnMap[header] || ''} 
+                            value={columnMap[header] || UNMAPPED_PLACEHOLDER_VALUE} 
                             onValueChange={(value) => handleColumnMapChange(header, value)}
                           >
                             <SelectTrigger>
                               <SelectValue placeholder="Select field or leave unmapped" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="">-- Unmapped --</SelectItem>
+                              <SelectItem value={UNMAPPED_PLACEHOLDER_VALUE}>-- Unmapped --</SelectItem>
                               {expectedTransactionFields.map(field => (
                                 <SelectItem key={field} value={field} className="capitalize">{field}</SelectItem>
                               ))}
@@ -342,10 +337,10 @@ export default function ImportTransactionsPage() {
                   <h3 className="text-md font-semibold mb-2">Data Preview (First {csvPreview.length} Rows)</h3>
                   <div className="overflow-x-auto border rounded-md p-2 bg-muted/30 max-h-60">
                     <Table className="text-xs">
-                       <TableHeader><TableRow>{csvHeaders.map((h, index) => <TableHead key={`${h}-${index}`}>{h}</TableHead>)}</TableRow></TableHeader>
+                       <TableHeader><TableRow>{csvHeaders.map((h, index) => <TableHead key={`${h}-preview-header-${index}`}>{h}</TableHead>)}</TableRow></TableHeader>
                        <TableBody>
                         {csvPreview.map((row, rowIndex) => (
-                          <TableRow key={`preview-row-${rowIndex}`}>{csvHeaders.map((h, cellIndex) => <TableCell key={`${h}-${cellIndex}-row-${rowIndex}`} className="max-w-[100px] truncate" title={row[h]}>{row[h]}</TableCell>)}</TableRow>
+                          <TableRow key={`preview-row-${rowIndex}`}>{csvHeaders.map((h, cellIndex) => <TableCell key={`${h}-preview-cell-${rowIndex}-${cellIndex}`} className="max-w-[100px] truncate" title={row[h]}>{row[h]}</TableCell>)}</TableRow>
                         ))}
                        </TableBody>
                     </Table>
@@ -354,7 +349,7 @@ export default function ImportTransactionsPage() {
               )}
             </CardContent>
             <CardFooter className="justify-between">
-               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); /* Do not fully reset form here */ }}>Back</Button>
+               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); }}>Back</Button>
                <Button type="submit" disabled={isLoading}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
                 Confirm and Import (Simulated)
