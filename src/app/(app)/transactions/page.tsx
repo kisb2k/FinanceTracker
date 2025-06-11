@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useCallback } from 'react';
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -76,13 +76,14 @@ export default function TransactionsPage() {
         getCategories(),
         getTransactions()
       ]);
-      setAccounts(fetchedAccounts);
-      setCategories(fetchedCategories);
-      setTransactions(fetchedTransactions);
+      setAccounts(fetchedAccounts || []);
+      setCategories(fetchedCategories || []);
+      setTransactions(fetchedTransactions || []);
     } catch (e) {
-      const errorMsg = (e as Error).message || "Failed to load page data.";
+      const errorMsg = (e as Error).message || "Failed to load page data. Check console for details.";
       setPageError(errorMsg);
-      toast({ title: "Error", description: errorMsg, variant: "destructive" });
+      console.error("Error fetching page data for Transactions:", e);
+      toast({ title: "Error Loading Data", description: errorMsg, variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -136,21 +137,29 @@ export default function TransactionsPage() {
       toast({ title: "Validation Error", description: "Please fill all fields: Account, Date, Description, valid Amount, and Category.", variant: "destructive" });
       return;
     }
+    if (accounts.length === 0) {
+        toast({ title: "Action Required", description: "Please add at least one account before adding transactions.", variant: "destructive" });
+        return;
+    }
+    if (categories.length === 0) {
+        toast({ title: "Action Required", description: "Please add at least one category before adding transactions.", variant: "destructive" });
+        return;
+    }
     
     try {
       const newTx = await addTransaction({
         accountId: newTransactionData.accountId,
-        date: newTransactionData.date, // format ensures YYYY-MM-DD
+        date: newTransactionData.date, 
         description: newTransactionData.description,
         amount: amountValue,
-        category: newTransactionData.category, // Store category name
+        category: newTransactionData.category, 
       });
       setTransactions(prev => [newTx, ...prev].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
       toast({ title: "Success", description: "Transaction added successfully." });
       setIsAddTransactionDialogOpen(false);
       setNewTransactionData(defaultAddTransactionData);
     } catch (e) {
-      toast({ title: "Error", description: (e as Error).message || "Failed to add transaction.", variant: "destructive" });
+      toast({ title: "Error Adding Transaction", description: (e as Error).message || "Failed to add transaction.", variant: "destructive" });
     }
   };
 
@@ -171,17 +180,17 @@ export default function TransactionsPage() {
     try {
       const updatedTx = await updateTransaction(editingTransaction.id, {
         accountId: editFormState.accountId,
-        date: editFormState.date, // format ensures YYYY-MM-DD
+        date: editFormState.date, 
         description: editFormState.description,
         amount: amountValue,
-        category: editFormState.category, // Store category name
+        category: editFormState.category, 
       });
       setTransactions(prev => prev.map(tx => tx.id === updatedTx.id ? updatedTx : tx).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()));
       toast({ title: "Success", description: "Transaction updated successfully." });
       setIsEditTransactionDialogOpen(false);
       setEditingTransaction(null);
     } catch (e) {
-      toast({ title: "Error", description: (e as Error).message || "Failed to update transaction.", variant: "destructive" });
+      toast({ title: "Error Updating Transaction", description: (e as Error).message || "Failed to update transaction.", variant: "destructive" });
     }
   };
 
@@ -200,7 +209,7 @@ export default function TransactionsPage() {
       setIsDeleteTransactionDialogOpen(false);
       setDeletingTransactionId(null);
     } catch (e) {
-       toast({ title: "Error", description: (e as Error).message || "Failed to delete transaction.", variant: "destructive" });
+       toast({ title: "Error Deleting Transaction", description: (e as Error).message || "Failed to delete transaction.", variant: "destructive" });
     }
   };
 
@@ -214,9 +223,8 @@ export default function TransactionsPage() {
       setCategories(prev => [...prev, newCat].sort((a,b) => a.name.localeCompare(b.name)));
       toast({ title: "Success", description: `Category "${newCat.name}" added.`});
       setNewCategoryName('');
-      // Optionally close manage categories dialog or refresh list within it
     } catch (e) {
-      toast({ title: "Error adding category", description: (e as Error).message, variant: "destructive" });
+      toast({ title: "Error Adding Category", description: (e as Error).message, variant: "destructive" });
     }
   };
 
@@ -224,11 +232,15 @@ export default function TransactionsPage() {
     if (!isDeletingCategory) return;
     try {
       await deleteCategoryService(isDeletingCategory.id);
+      // Optimistically remove from UI, also remove from category filter if it was selected
+      if (selectedCategoryFilter === isDeletingCategory.id) {
+        setSelectedCategoryFilter('all');
+      }
       setCategories(prev => prev.filter(cat => cat.id !== isDeletingCategory.id));
       toast({ title: "Success", description: `Category "${isDeletingCategory.name}" deleted.`, variant: "destructive" });
       setIsDeletingCategory(null);
     } catch (e) {
-      toast({ title: "Error deleting category", description: (e as Error).message, variant: "destructive" });
+      toast({ title: "Error Deleting Category", description: (e as Error).message, variant: "destructive" });
     }
   };
   
@@ -272,7 +284,7 @@ export default function TransactionsPage() {
           <Button variant="outline" onClick={() => setIsManageCategoriesDialogOpen(true)}>
             <Settings2 className="mr-2 h-4 w-4" /> Manage Categories
           </Button>
-           <Button onClick={() => setIsAddTransactionDialogOpen(true)}>
+           <Button onClick={() => setIsAddTransactionDialogOpen(true)} disabled={accounts.length === 0 || categories.length === 0}>
             <FolderPlus className="mr-2 h-4 w-4" /> Add Transaction
           </Button>
           <Button variant="outline" asChild>
@@ -281,6 +293,13 @@ export default function TransactionsPage() {
             </Link>
           </Button>
         </div>
+        {(accounts.length === 0 || categories.length === 0) && !isLoading && (
+            <p className="text-sm text-muted-foreground w-full sm:w-auto text-center sm:text-left">
+                Please {accounts.length === 0 ? 'add accounts' : ''}
+                {accounts.length === 0 && categories.length === 0 ? ' and ' : ''}
+                {categories.length === 0 ? 'create categories' : ''} to start adding transactions.
+            </p>
+        )}
       </div>
 
       <Card className="shadow-lg">
@@ -296,14 +315,14 @@ export default function TransactionsPage() {
                 className="pl-8"
               />
             </div>
-            <Select value={selectedAccountFilter} onValueChange={setSelectedAccountFilter}>
+            <Select value={selectedAccountFilter} onValueChange={setSelectedAccountFilter} disabled={accounts.length === 0}>
               <SelectTrigger><SelectValue placeholder="Filter by Account" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Accounts</SelectItem>
                 {accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}
               </SelectContent>
             </Select>
-            <Select value={selectedCategoryFilter} onValueChange={setSelectedCategoryFilter}>
+            <Select value={selectedCategoryFilter} onValueChange={setSelectedCategoryFilter} disabled={categories.length === 0}>
               <SelectTrigger><SelectValue placeholder="Filter by Category" /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="all">All Categories</SelectItem>
@@ -364,7 +383,7 @@ export default function TransactionsPage() {
               )) : (
                 <TableRow>
                   <TableCell colSpan={7} className="h-24 text-center">
-                    No transactions found. Try adjusting your filters or add a new transaction.
+                    {isLoading ? 'Loading transactions...' : 'No transactions found. Try adjusting your filters or add a new transaction.'}
                   </TableCell>
                 </TableRow>
               )}
@@ -380,10 +399,12 @@ export default function TransactionsPage() {
           <div className="grid gap-4 py-4">
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="add-accountId" className="text-right">Account</Label>
-              <Select name="accountId" value={newTransactionData.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setNewTransactionData)}>
-                <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
-                <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
-              </Select>
+              {accounts.length > 0 ? (
+                <Select name="accountId" value={newTransactionData.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setNewTransactionData)}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
+                  <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
+                </Select>
+              ) : <p className="col-span-3 text-sm text-muted-foreground">No accounts available. Please add an account first.</p>}
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="add-date" className="text-right">Date</Label>
@@ -399,15 +420,17 @@ export default function TransactionsPage() {
             </div>
             <div className="grid grid-cols-4 items-center gap-4">
               <Label htmlFor="add-category" className="text-right">Category</Label>
-              <Select name="category" value={newTransactionData.category} onValueChange={(value) => handleSelectChange("category", value, setNewTransactionData)}>
-                <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
-                <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
-              </Select>
+              {categories.length > 0 ? (
+                <Select name="category" value={newTransactionData.category} onValueChange={(value) => handleSelectChange("category", value, setNewTransactionData)}>
+                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
+                  <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
+                </Select>
+              ): <p className="col-span-3 text-sm text-muted-foreground">No categories available. Please add a category first.</p>}
             </div>
           </div>
           <DialogFooter>
             <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
-            <Button onClick={handleAddTransactionSubmit}>Add Transaction</Button>
+            <Button onClick={handleAddTransactionSubmit} disabled={accounts.length === 0 || categories.length === 0}>Add Transaction</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -420,10 +443,12 @@ export default function TransactionsPage() {
             <div className="grid gap-4 py-4">
                <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-accountId" className="text-right">Account</Label>
-                <Select name="accountId" value={editFormState.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setEditFormState)}>
-                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
-                  <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
-                </Select>
+                {accounts.length > 0 ? (
+                  <Select name="accountId" value={editFormState.accountId} onValueChange={(value) => handleSelectChange("accountId", value, setEditFormState)}>
+                    <SelectTrigger className="col-span-3"><SelectValue placeholder="Select an account" /></SelectTrigger>
+                    <SelectContent>{accounts.map(acc => <SelectItem key={acc.id} value={acc.id}>{acc.name}</SelectItem>)}</SelectContent>
+                  </Select>
+                ) : <p className="col-span-3 text-sm text-muted-foreground">No accounts available.</p>}
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-date" className="text-right">Date</Label>
@@ -439,16 +464,18 @@ export default function TransactionsPage() {
               </div>
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="edit-category" className="text-right">Category</Label>
-                <Select name="category" value={editFormState.category} onValueChange={(value) => handleSelectChange("category", value, setEditFormState)}>
-                  <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
-                  <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
-                </Select>
+                 {categories.length > 0 ? (
+                    <Select name="category" value={editFormState.category} onValueChange={(value) => handleSelectChange("category", value, setEditFormState)}>
+                      <SelectTrigger className="col-span-3"><SelectValue placeholder="Select a category" /></SelectTrigger>
+                      <SelectContent>{categories.map(cat => <SelectItem key={cat.id} value={cat.name}>{cat.name}</SelectItem>)}</SelectContent>
+                    </Select>
+                 ) : <p className="col-span-3 text-sm text-muted-foreground">No categories available.</p>}
               </div>
             </div>
           )}
           <DialogFooter>
             <DialogClose asChild><Button variant="outline">Cancel</Button></DialogClose>
-            <Button onClick={handleEditTransactionSubmit}>Save Changes</Button>
+            <Button onClick={handleEditTransactionSubmit} disabled={accounts.length === 0 || categories.length === 0}>Save Changes</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -508,4 +535,3 @@ export default function TransactionsPage() {
     </div>
   );
 }
-

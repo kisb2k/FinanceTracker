@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { PlusCircle, Edit3, Trash2, Target, AlertTriangle, FileText, Loader2, AlertCircleIcon } from "lucide-react";
 import type { Budget, Category, BudgetCategoryLimit } from '@/lib/types';
 import { getBudgets, addBudget, updateBudget, deleteBudget as deleteBudgetService, type AddBudgetData } from '@/services/budgetService';
-import { getCategories } from '@/services/categoryService'; // Import categoryService
+import { getCategories } from '@/services/categoryService';
 import { useToast } from '@/hooks/use-toast';
 
 // Simulated current spending - will be 0 until transaction integration
@@ -23,7 +23,7 @@ const currentSpending: Record<string, Record<string, number>> = {};
 
 export default function BudgetsPage() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
-  const [allCategories, setAllCategories] = useState<Category[]>([]); // State for fetched categories
+  const [allCategories, setAllCategories] = useState<Category[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { toast } = useToast();
@@ -42,12 +42,13 @@ export default function BudgetsPage() {
         getBudgets(),
         getCategories()
       ]);
-      setBudgets(fetchedBudgets);
-      setAllCategories(fetchedCategories);
+      setBudgets(fetchedBudgets || []);
+      setAllCategories(fetchedCategories || []);
     } catch (e) {
-      const errorMsg = (e as Error).message || "Failed to load budget data.";
+      const errorMsg = (e as Error).message || "Failed to load budget data. Check console for details.";
       setError(errorMsg);
-      toast({ title: "Error", description: errorMsg, variant: "destructive" });
+      console.error("Error fetching page data for Budgets:", e);
+      toast({ title: "Error Loading Data", description: errorMsg, variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -62,13 +63,22 @@ export default function BudgetsPage() {
   };
 
   const openBudgetDialog = (budgetToEdit?: Budget) => {
+    if (allCategories.length === 0) {
+        toast({ title: "Action Required", description: "Please add categories on the Transactions page before creating budgets.", variant: "default" });
+        return;
+    }
     if (budgetToEdit) {
+      // Ensure tempCategoryLimits includes all available categories, preserving existing limits
+      const existingLimitsMap = new Map(budgetToEdit.categoryLimits?.map(cl => [cl.categoryId, cl.limit]));
+      const synchronizedLimits = allCategories.map(cat => ({
+        categoryId: cat.id,
+        limit: existingLimitsMap.get(cat.id) || 0,
+      }));
       setEditingBudget({ 
         ...budgetToEdit, 
-        tempCategoryLimits: budgetToEdit.categoryLimits ? [...budgetToEdit.categoryLimits] : [] 
+        tempCategoryLimits: synchronizedLimits
       });
     } else {
-      // Initialize with empty limits for all available categories if needed, or start empty
       const initialLimits = allCategories.map(cat => ({ categoryId: cat.id, limit: 0 }));
       setEditingBudget({ name: '', isDefault: false, timePeriod: 'monthly', tempCategoryLimits: initialLimits });
     }
@@ -81,7 +91,6 @@ export default function BudgetsPage() {
       return;
     }
 
-    // Filter out category limits where limit is 0 or not set, unless you want to store 0 limits
     const validCategoryLimits = editingBudget.tempCategoryLimits.filter(cl => cl.limit > 0);
     if (validCategoryLimits.length === 0) {
         toast({ title: "Validation Error", description: "Please set a limit for at least one category.", variant: "destructive" });
@@ -94,16 +103,16 @@ export default function BudgetsPage() {
       name: editingBudget.name!,
       isDefault: editingBudget.isDefault || false,
       timePeriod: editingBudget.timePeriod!,
-      categoryLimits: validCategoryLimits, // Use filtered limits
+      categoryLimits: validCategoryLimits,
       totalBudgetAmount: totalBudget,
     };
 
     try {
-      if (editingBudget.id) { // Editing existing budget
+      if (editingBudget.id) {
         await updateBudget(editingBudget.id, budgetDataPayload);
         setBudgets(budgets.map(b => b.id === editingBudget!.id ? { ...b, ...budgetDataPayload, id: editingBudget!.id } as Budget : b).sort((a,b) => a.name.localeCompare(b.name)));
         toast({ title: "Success", description: `Budget "${budgetDataPayload.name}" updated.` });
-      } else { // Adding new budget
+      } else { 
         const newBudget = await addBudget(budgetDataPayload as AddBudgetData);
         setBudgets(prev => [...prev, newBudget].sort((a,b) => a.name.localeCompare(b.name)));
         toast({ title: "Success", description: `Budget "${newBudget.name}" created.` });
@@ -111,7 +120,7 @@ export default function BudgetsPage() {
       resetBudgetForm();
       setIsBudgetDialogOpen(false);
     } catch (e) {
-      toast({ title: "Error", description: (e as Error).message || "Failed to save budget.", variant: "destructive" });
+      toast({ title: "Error Saving Budget", description: (e as Error).message || "Failed to save budget.", variant: "destructive" });
     }
   };
   
@@ -121,12 +130,13 @@ export default function BudgetsPage() {
 
     setEditingBudget(prev => {
       if (!prev) return null;
-      let existingLimits = prev.tempCategoryLimits ? [...prev.tempCategoryLimits] : [];
+      let existingLimits = prev.tempCategoryLimits ? [...prev.tempCategoryLimits] : allCategories.map(cat => ({ categoryId: cat.id, limit: 0 }));
       const limitIndex = existingLimits.findIndex(cl => cl.categoryId === categoryId);
 
       if (limitIndex > -1) {
         existingLimits[limitIndex] = { ...existingLimits[limitIndex], limit };
       } else {
+        // This case should ideally not happen if tempCategoryLimits is initialized correctly
         existingLimits.push({ categoryId, limit });
       }
       
@@ -154,7 +164,7 @@ export default function BudgetsPage() {
       setIsDeleteDialogOpen(false);
       setDeletingBudgetId(null);
     } catch (e) {
-      toast({ title: "Error", description: (e as Error).message || "Failed to delete budget.", variant: "destructive" });
+      toast({ title: "Error Deleting Budget", description: (e as Error).message || "Failed to delete budget.", variant: "destructive" });
     }
   };
 
@@ -190,13 +200,14 @@ export default function BudgetsPage() {
     <div className="flex flex-col gap-6">
       <div className="flex justify-between items-center">
         <h1 className="text-3xl font-bold tracking-tight font-headline">Budgets</h1>
-        <Button onClick={() => openBudgetDialog()} disabled={allCategories.length === 0}>
+        <Button onClick={() => openBudgetDialog()} disabled={allCategories.length === 0 && !isLoading}>
           <PlusCircle className="mr-2 h-5 w-5" /> Create Budget
         </Button>
-        {allCategories.length === 0 && <p className="text-sm text-muted-foreground">Please add categories first (via Transactions page) to create budgets.</p>}
       </div>
+      {allCategories.length === 0 && !isLoading && <p className="text-sm text-muted-foreground text-center">Please add categories on the Transactions page first to create budgets.</p>}
 
-      {budgets.length === 0 ? (
+
+      {budgets.length === 0 && !isLoading ? (
         <Card className="text-center py-10">
           <CardHeader>
              <FileText className="mx-auto h-12 w-12 text-muted-foreground" />
@@ -259,7 +270,7 @@ export default function BudgetsPage() {
                         <Progress value={Math.min(progress, 100)} className={`mt-1 ${categoryIsOverBudget ? '[&>div]:bg-destructive': ''}`} />
                       </div>
                     );
-                  }) : <p className="text-sm text-muted-foreground">No specific category limits set.</p>}
+                  }) : <p className="text-sm text-muted-foreground">No specific category limits set for this budget.</p>}
                 </CardContent>
                 <CardFooter className="flex justify-end gap-2 border-t pt-4 mt-auto">
                   <Button variant="ghost" size="icon" onClick={() => openBudgetDialog(budget)} aria-label="Edit budget">
@@ -307,14 +318,14 @@ export default function BudgetsPage() {
               <h4 className="font-medium mt-4 col-span-4">Category Limits ($)</h4>
               {allCategories.length > 0 ? allCategories.map(category => {
                  const currentLimitObj = editingBudget.tempCategoryLimits?.find(cl => cl.categoryId === category.id);
-                 const currentLimitValue = currentLimitObj ? currentLimitObj.limit : 0; // Default to 0 if not found
+                 const currentLimitValue = currentLimitObj ? currentLimitObj.limit : 0;
                  return (
                   <div key={category.id} className="grid grid-cols-4 items-center gap-4">
                       <Label htmlFor={`limit-${category.id}`} className="text-right">{category.name}</Label>
                       <Input 
                           id={`limit-${category.id}`} 
                           type="number" 
-                          value={String(currentLimitValue)} // Ensure value is always a string
+                          value={String(currentLimitValue)} 
                           onChange={(e) => handleCategoryLimitChange(category.id, e.target.value)}
                           className="col-span-3" 
                           placeholder="e.g., 200" 
@@ -326,7 +337,7 @@ export default function BudgetsPage() {
           )}
           <DialogFooter>
             <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
-            <Button type="submit" onClick={handleSaveBudget}>Save Budget</Button>
+            <Button type="submit" onClick={handleSaveBudget} disabled={allCategories.length === 0}>Save Budget</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -351,3 +362,4 @@ export default function BudgetsPage() {
     </div>
   );
 }
+
