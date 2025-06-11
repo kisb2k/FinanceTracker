@@ -111,9 +111,19 @@ export default function ImportTransactionsPage() {
         const csvDataContent = e.target?.result as string;
         setProgressValue(30);
         try {
-            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent });
-            setColumnMap(aiResult.columnMap);
-            toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
+            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\\r\\n|\\n|\\r/).slice(0, 10).join('\\n') }); // Send headers + few rows
+            if (aiResult && aiResult.columnMappings) {
+              const newColumnMap = aiResult.columnMappings.reduce((acc, mapping) => {
+                if (mapping.csvHeader) {
+                  acc[mapping.csvHeader] = mapping.transactionField || '';
+                }
+                return acc;
+              }, {} as Record<string, string>);
+              setColumnMap(newColumnMap);
+              toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
+            } else {
+              throw new Error("AI mapping result was not in the expected format.");
+            }
         } catch (aiMapError) {
             console.error("AI Mapping Error:", aiMapError);
             setError('AI column mapping failed. Please map columns manually or verify CSV format.');

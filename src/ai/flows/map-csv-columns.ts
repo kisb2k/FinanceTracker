@@ -1,3 +1,4 @@
+
 'use server';
 
 /**
@@ -12,13 +13,18 @@ import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
 
 const MapCsvColumnsInputSchema = z.object({
-  csvData: z.string().describe('The CSV data to map.'),
+  csvData: z.string().describe('The CSV data to map. Provide at least the header row and a few data rows.'),
 });
 
 export type MapCsvColumnsInput = z.infer<typeof MapCsvColumnsInputSchema>;
 
+const MappingEntrySchema = z.object({
+  csvHeader: z.string().describe("The original CSV column header from the input data."),
+  transactionField: z.string().describe("The standard transaction data field this CSV header maps to (e.g., 'date', 'description', 'amount', 'category', 'account'). Use an empty string if the column is unmapped or should be ignored.")
+});
+
 const MapCsvColumnsOutputSchema = z.object({
-  columnMap: z.record(z.string(), z.string()).describe('A map of CSV column names to transaction data fields.'),
+  columnMappings: z.array(MappingEntrySchema).describe('A list of mappings, where each mapping links a CSV column header to a standard transaction data field.'),
 });
 
 export type MapCsvColumnsOutput = z.infer<typeof MapCsvColumnsOutputSchema>;
@@ -33,15 +39,28 @@ const prompt = ai.definePrompt({
   output: {schema: MapCsvColumnsOutputSchema},
   prompt: `You are an expert in mapping CSV column names to transaction data fields.
 
-  Given the following CSV data:
+  Given the following CSV data (header row and potentially a few sample data rows):
+  {{{csvData}}}
 
-  {{csvData}}
+  Your task is to return a JSON object containing a single key "columnMappings".
+  The value of "columnMappings" MUST be an array of objects.
+  Each object in the array MUST have two string properties:
+  1. "csvHeader": This should be a string exactly matching one of the column headers from the provided CSV data.
+  2. "transactionField": This should be a string representing the standard transaction data field that the "csvHeader" maps to.
 
-  Return a JSON object that maps the CSV column names to the correct transaction data fields. The keys of the JSON object should be the CSV column names, and the values should be the corresponding transaction data fields.
+  Example standard transaction data fields include: "date", "description", "amount", "category", "account".
+  
+  If a CSV column header from the input does not clearly map to any standard transaction field, its corresponding "transactionField" value in the object should be an empty string ("").
+  Ensure every CSV header from the input data is represented in the "columnMappings" array.
 
-  Example transaction data fields include: date, description, amount, category, account.
-
-  Ensure that the JSON object is valid and can be parsed by JSON.parse().
+  Ensure the output is a valid JSON object that can be parsed by JSON.parse(), and strictly adheres to the schema:
+  {
+    "columnMappings": [
+      { "csvHeader": "Header1FromCSV", "transactionField": "date" },
+      { "csvHeader": "Header2FromCSV", "transactionField": "description" },
+      { "csvHeader": "UnmappedHeader", "transactionField": "" }
+    ]
+  }
   `,
 });
 
