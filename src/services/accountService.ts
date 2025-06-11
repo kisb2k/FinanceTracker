@@ -13,10 +13,32 @@ import {
   query,
   orderBy,
   getDoc,
-  serverTimestamp
+  serverTimestamp,
+  Timestamp
 } from 'firebase/firestore';
 
 const ACCOUNTS_COLLECTION = 'accounts';
+
+// Helper to convert Firestore Timestamps to ISO strings if they exist
+const accountFromDoc = (docSnapshot: any): Account => {
+  const data = docSnapshot.data();
+  const account: Account = {
+    id: docSnapshot.id,
+    name: data.name,
+    type: data.type,
+    balance: data.balance,
+    currency: data.currency,
+    lastImported: data.lastImported, // Assuming lastImported is already a string or undefined
+    createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate().toISOString() : data.createdAt,
+    updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt,
+  };
+  // If lastImported could also be a Timestamp, convert it:
+  if (data.lastImported instanceof Timestamp) {
+    account.lastImported = data.lastImported.toDate().toISOString();
+  }
+  return account;
+};
+
 
 export async function getAccounts(): Promise<Account[]> {
   console.log('[AccountService] Attempting to fetch accounts...');
@@ -29,10 +51,7 @@ export async function getAccounts(): Promise<Account[]> {
     const accountsCollection = collection(db, ACCOUNTS_COLLECTION);
     const q = query(accountsCollection, orderBy("name", "asc"));
     const accountSnapshot = await getDocs(q);
-    const accountList = accountSnapshot.docs.map(doc => ({
-      id: doc.id,
-      ...doc.data(),
-    } as Account));
+    const accountList = accountSnapshot.docs.map(accountFromDoc);
     console.log(`[AccountService] Fetched ${accountList.length} accounts.`);
     return accountList;
   } catch (error) {
@@ -44,7 +63,7 @@ export async function getAccounts(): Promise<Account[]> {
   }
 }
 
-export type AddAccountData = Omit<Account, 'id' | 'balance' | 'lastImported'> & { initialBalance?: number };
+export type AddAccountData = Omit<Account, 'id' | 'balance' | 'lastImported' | 'createdAt' | 'updatedAt'> & { initialBalance?: number };
 
 export async function addAccount(accountData: AddAccountData): Promise<Account> {
   console.log('[AccountService] Attempting to add account:', accountData.name);
@@ -55,11 +74,12 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
   }
   try {
     const balance = accountData.initialBalance || 0;
-    const newAccountPayload: Omit<Account, 'id'> = {
+    const newAccountPayload: Omit<Account, 'id' | 'createdAt' | 'updatedAt'> & { createdAt: any, updatedAt: any } = {
       name: accountData.name,
       type: accountData.type,
       currency: accountData.currency,
       balance: accountData.type === 'credit' ? -Math.abs(balance) : Math.abs(balance),
+      lastImported: undefined, // Explicitly set as undefined initially
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -67,17 +87,11 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
     const docRef = await addDoc(collection(db, ACCOUNTS_COLLECTION), newAccountPayload);
     console.log('[AccountService] Account added successfully to Firestore with ID:', docRef.id);
     
-    const newDoc = await getDoc(docRef);
-     if (!newDoc.exists()) {
+    const newDocSnapshot = await getDoc(docRef);
+     if (!newDocSnapshot.exists()) {
         throw new Error(`Failed to retrieve newly added account with ID ${docRef.id}.`);
     }
-    const newAccountData = newDoc.data();
-    return { 
-        id: newDoc.id, 
-        ...newAccountData,
-        createdAt: newAccountData.createdAt?.toDate().toISOString(), // Convert Timestamps
-        updatedAt: newAccountData.updatedAt?.toDate().toISOString()
-    } as Account;
+    return accountFromDoc(newDocSnapshot);
 
   } catch (error) {
     console.error(`[AccountService] Error adding account "${accountData.name}" to Firestore: `, error);
@@ -103,17 +117,11 @@ export async function updateAccount(accountId: string, updates: UpdateAccountDat
     await updateDoc(accountRef, updatePayload);
     console.log(`[AccountService] Account ${accountId} updated successfully in Firestore.`);
     
-    const updatedDoc = await getDoc(accountRef);
-    if (!updatedDoc.exists()) {
+    const updatedDocSnapshot = await getDoc(accountRef);
+    if (!updatedDocSnapshot.exists()) {
         throw new Error(`Account with ID ${accountId} not found after update.`);
     }
-    const updatedData = updatedDoc.data();
-    return { 
-        id: updatedDoc.id, 
-        ...updatedData,
-        createdAt: updatedData.createdAt?.toDate().toISOString(),
-        updatedAt: updatedData.updatedAt?.toDate().toISOString() 
-    } as Account;
+    return accountFromDoc(updatedDocSnapshot);
   } catch (error) {
     console.error(`[AccountService] Error updating account ${accountId} in Firestore: `, error);
     const originalError = error as any;
@@ -133,7 +141,7 @@ export async function updateAccountLastImported(accountId: string): Promise<void
   try {
     const accountRef = doc(db, ACCOUNTS_COLLECTION, accountId);
     await updateDoc(accountRef, {
-      lastImported: new Date().toISOString(),
+      lastImported: new Date().toISOString(), // This is already a string
       updatedAt: serverTimestamp()
     });
     console.log(`[AccountService] Account ${accountId} lastImported updated successfully.`);
@@ -158,7 +166,8 @@ export async function deleteAccount(accountId: string): Promise<void> {
     const accountRef = doc(db, ACCOUNTS_COLLECTION, accountId);
     await deleteDoc(accountRef);
     console.log(`[AccountService] Account ${accountId} deleted successfully from Firestore.`);
-  } catch (error) {
+  } catch (error)
+{
     console.error(`[AccountService] Error deleting account ${accountId} from Firestore: `, error);
     const originalError = error as any;
     const errorMessage = `AccountService Error (deleteAccount: ${accountId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
@@ -166,3 +175,4 @@ export async function deleteAccount(accountId: string): Promise<void> {
     throw new Error(errorMessage);
   }
 }
+
