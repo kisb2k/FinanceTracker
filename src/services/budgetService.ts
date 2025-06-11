@@ -18,9 +18,13 @@ import {
 const BUDGETS_COLLECTION = 'budgets';
 
 export async function getBudgets(): Promise<Budget[]> {
+  if (!db) {
+    const errorMsg = "[BudgetService] Firestore db instance is not available. Critical configuration issue.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
   try {
     const budgetsCollection = collection(db, BUDGETS_COLLECTION);
-    // Consider adding orderBy, e.g., orderBy("createdAt", "desc") or orderBy("name", "asc")
     const q = query(budgetsCollection, orderBy("name", "asc"));
     const budgetSnapshot = await getDocs(q);
     const budgetList = budgetSnapshot.docs.map(doc => {
@@ -28,55 +32,81 @@ export async function getBudgets(): Promise<Budget[]> {
       return {
         id: doc.id,
         ...data,
-        // Firestore timestamps need to be handled if you store them
-        // createdAt: (data.createdAt as Timestamp)?.toDate().toISOString(), 
       } as Budget;
     });
     return budgetList;
   } catch (error) {
-    console.error("Error fetching budgets: ", error);
-    throw new Error("Failed to fetch budgets.");
+    console.error("[BudgetService] Error fetching budgets: ", error);
+    const originalError = error as any;
+    const errorMessage = `BudgetService Error (getBudgets): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules or Firebase configuration.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
 export type AddBudgetData = Omit<Budget, 'id'>;
 
 export async function addBudget(budgetData: AddBudgetData): Promise<Budget> {
+  if (!db) {
+    const errorMsg = "[BudgetService] Firestore db instance is not available. Critical configuration issue.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
   try {
     const budgetPayload = {
       ...budgetData,
-      // createdAt: Timestamp.now() // Optional: add a creation timestamp
     };
     const docRef = await addDoc(collection(db, BUDGETS_COLLECTION), budgetPayload);
-    return { id: docRef.id, ...budgetPayload } as Budget; // Adjust if using server timestamps
+    return { id: docRef.id, ...budgetPayload } as Budget;
   } catch (error) {
-    console.error("Error adding budget: ", error);
-    throw new Error("Failed to add budget.");
+    console.error("[BudgetService] Error adding budget: ", error);
+    const originalError = error as any;
+    const errorMessage = `BudgetService Error (addBudget: ${budgetData.name}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
 export type UpdateBudgetData = Partial<Omit<Budget, 'id'>>;
 
 export async function updateBudget(budgetId: string, updates: UpdateBudgetData): Promise<Budget> {
+  if (!db) {
+    const errorMsg = "[BudgetService] Firestore db instance is not available. Critical configuration issue.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
   try {
     const budgetRef = doc(db, BUDGETS_COLLECTION, budgetId);
     await updateDoc(budgetRef, updates);
-    // For returning the full updated budget, you might need to fetch it again
-    // or merge updates carefully if not all fields are guaranteed to be in `updates`.
-    // This simplified version assumes the client can merge.
-    return { id: budgetId, ...updates } as Budget; 
+    // This simplified version assumes the client can merge or refetches if necessary.
+    const updatedDoc = await getDoc(budgetRef);
+     if (!updatedDoc.exists()) {
+        throw new Error(`Budget with ID ${budgetId} not found after update.`);
+    }
+    return { id: updatedDoc.id, ...updatedDoc.data() } as Budget; 
   } catch (error) {
-    console.error("Error updating budget: ", error);
-    throw new Error("Failed to update budget.");
+    console.error("[BudgetService] Error updating budget: ", error);
+    const originalError = error as any;
+    const errorMessage = `BudgetService Error (updateBudget: ${budgetId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
 export async function deleteBudget(budgetId: string): Promise<void> {
+  if (!db) {
+    const errorMsg = "[BudgetService] Firestore db instance is not available. Critical configuration issue.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
   try {
     const budgetRef = doc(db, BUDGETS_COLLECTION, budgetId);
     await deleteDoc(budgetRef);
   } catch (error) {
-    console.error("Error deleting budget: ", error);
-    throw new Error("Failed to delete budget.");
+    console.error("[BudgetService] Error deleting budget: ", error);
+    const originalError = error as any;
+    const errorMessage = `BudgetService Error (deleteBudget: ${budgetId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }

@@ -24,8 +24,9 @@ const CATEGORIES_COLLECTION = 'categories';
 export async function getCategories(): Promise<Category[]> {
   console.log('[CategoryService] Attempting to fetch categories...');
   if (!db) {
-    console.error("[CategoryService] CRITICAL: Firestore db instance is not available for getCategories. Firebase might not be initialized correctly. Check Firebase configuration (src/lib/firebase.ts) and .env.local settings. Ensure server was restarted after .env.local changes.");
-    throw new Error("Firestore database is not initialized. Cannot fetch categories.");
+    const errorMsg = "[CategoryService] CRITICAL: Firestore db instance is not available for getCategories. Firebase might not be initialized correctly. Check Firebase configuration (src/lib/firebase.ts) and .env.local settings. Ensure server was restarted after .env.local changes.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
   try {
     const categoriesCollection = collection(db, CATEGORIES_COLLECTION);
@@ -48,26 +49,27 @@ export async function getCategories(): Promise<Category[]> {
   } catch (error) {
     console.error("======================================================================");
     console.error("[CategoryService] CRITICAL ERROR FETCHING CATEGORIES FROM FIRESTORE:");
-    console.error("Original Firestore Error Object (see details below):", error);
-    if (error instanceof Error) {
-        console.error("  [CategoryService] Firestore Error Name: ", error.name);
-        console.error("  [CategoryService] Firestore Error Message: ", error.message);
-        // @ts-ignore
-        if (error.code) {
-          console.error("  [CategoryService] Firestore Error Code: ", error.code);
-          if (error.code === 'permission-denied') {
-            console.error("  [CategoryService] Hint: 'permission-denied' usually means your Firestore security rules are blocking access. Please verify them in the Firebase console for the 'categories' collection. Rules should be: match /categories/{categoryId} { allow read, write: if true; } for development.");
-          } else if (error.code === 'unimplemented') {
-             console.error("  [CategoryService] Hint: 'unimplemented' can mean a query requires an index that Firestore couldn't create automatically. Check if Firestore prompted for index creation in its logs or UI. The error message usually contains a direct link to create the index.");
-          } else if (error.code === 'unavailable') {
-            console.error("  [CategoryService] Hint: 'unavailable' can indicate a temporary issue with Firestore services or network connectivity from your server.");
-          }
-        }
-    } else {
-      console.error("  [CategoryService] An unexpected error type was caught:", error);
+    console.error("[CategoryService] Original Firestore Error Object (see details below):", error);
+    const originalError = error as any; // To access potential 'code' property
+    if (originalError instanceof Error) { // Standard Error properties
+        console.error("  [CategoryService] Firestore Error Name: ", originalError.name);
+        console.error("  [CategoryService] Firestore Error Message: ", originalError.message);
+    }
+    if (originalError.code) { // Firestore specific error code
+      console.error("  [CategoryService] Firestore Error Code: ", originalError.code);
+      if (originalError.code === 'permission-denied') {
+        console.error("  [CategoryService] Hint: 'permission-denied' usually means your Firestore security rules are blocking access. Please verify them in the Firebase console for the 'categories' collection. Rules should be: match /categories/{categoryId} { allow read, write: if true; } for development.");
+      } else if (originalError.code === 'unimplemented' || (originalError.message && originalError.message.toLowerCase().includes('index'))) {
+         console.error("  [CategoryService] Hint: This error (often 'unimplemented' or mentioning 'index') means a query requires an index that Firestore couldn't create automatically (e.g., for 'orderBy(\"name\", \"asc\")'). Check if Firestore prompted for index creation in its logs or UI. The error message in server logs (Google Cloud Logging) usually contains a direct link to create the index.");
+      } else if (originalError.code === 'unavailable') {
+        console.error("  [CategoryService] Hint: 'unavailable' can indicate a temporary issue with Firestore services or network connectivity from your server.");
+      }
+    } else if (!(originalError instanceof Error)) {
+      console.error("  [CategoryService] An unexpected, non-Error type was caught:", originalError);
     }
     console.error("======================================================================");
-    throw new Error(`Failed to fetch categories. **SEE SERVER TERMINAL LOGS (ABOVE THIS MESSAGE) for original Firestore error details (e.g., permission denied, missing indexes).** Common issues are Firestore security rules or Firebase configuration.`);
+    const errorMessage = `CategoryService Error (getCategories): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules or missing indexes.`;
+    throw new Error(errorMessage);
   }
 }
 
@@ -76,12 +78,14 @@ export type AddCategoryData = Omit<Category, 'id' | 'nameLower' | 'createdAt' | 
 export async function addCategory(categoryData: AddCategoryData): Promise<Category> {
   console.log('[CategoryService] Attempting to add category:', categoryData.name);
   if (!db) {
-    console.error("[CategoryService] CRITICAL: Firestore db instance is not available for addCategory. Check Firebase initialization.");
-    throw new Error("Firestore database is not initialized. Cannot add category.");
+    const errorMsg = "[CategoryService] CRITICAL: Firestore db instance is not available for addCategory. Check Firebase initialization.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
   if (!categoryData.name || categoryData.name.trim() === "") {
-    console.error("[CategoryService] Validation Error: Category name cannot be empty.");
-    throw new Error("Category name cannot be empty.");
+    const validationError = "[CategoryService] Validation Error: Category name cannot be empty.";
+    console.error(validationError);
+    throw new Error(validationError);
   }
 
   const trimmedName = categoryData.name.trim();
@@ -92,20 +96,22 @@ export async function addCategory(categoryData: AddCategoryData): Promise<Catego
     const querySnapshot = await getDocs(qCheck);
     if (!querySnapshot.empty) {
       const existingCategory = querySnapshot.docs[0].data() as Category;
-      console.warn(`[CategoryService] Category "${trimmedName}" already exists with ID ${querySnapshot.docs[0].id}.`);
+      const duplicateError = `[CategoryService] Category "${trimmedName}" already exists with ID ${querySnapshot.docs[0].id}.`;
+      console.warn(duplicateError);
       throw new Error(`Category "${trimmedName}" already exists.`);
     }
   } catch (checkError) {
     console.error("[CategoryService] Error checking for existing category:", checkError);
+    const originalCheckError = checkError as any;
+    const errorPrefix = `CategoryService Error (check existing category: ${trimmedName}): ${originalCheckError.name || 'Unknown Error'} (Code: ${originalCheckError.code || 'N/A'}) - ${originalCheckError.message || 'No message'}.`;
+    let hint = "";
     // @ts-ignore
-    if (checkError.code === 'permission-denied') {
-       throw new Error("Permission denied while checking for existing categories. Verify Firestore security rules.");
+    if (originalCheckError.code === 'permission-denied') {
+       hint = " Hint: Permission denied while checking for existing categories. Verify Firestore security rules.";
+    } else if (originalCheckError.code === 'failed-precondition' && originalCheckError.message && originalCheckError.message.includes('requires an index')) {
+      hint = " Hint: Firestore query for checking existing category name requires an index (on 'nameLower'). Please create it in your Firebase console.";
     }
-    // @ts-ignore
-    if (checkError.code === 'failed-precondition' && checkError.message.includes('requires an index')) {
-      throw new Error("Firestore query for checking existing category name requires an index (on 'nameLower'). Please create it in your Firebase console. Error: " + (checkError as Error).message);
-    }
-    throw new Error("Failed to check for existing categories. Details: " + (checkError as Error).message);
+    throw new Error(`${errorPrefix}${hint} **CHECK SERVER LOGS for full details.**`);
   }
 
   try {
@@ -121,8 +127,9 @@ export async function addCategory(categoryData: AddCategoryData): Promise<Catego
     
     const newDocSnapshot = await getDoc(docRef);
     if (!newDocSnapshot.exists()) {
-        console.error(`[CategoryService] Failed to retrieve newly added category with ID ${docRef.id}.`);
-        throw new Error(`Failed to retrieve newly added category with ID ${docRef.id}.`);
+        const fetchError = `[CategoryService] Failed to retrieve newly added category with ID ${docRef.id}.`;
+        console.error(fetchError);
+        throw new Error(fetchError);
     }
     const newCategoryData = newDocSnapshot.data();
     return { 
@@ -134,24 +141,22 @@ export async function addCategory(categoryData: AddCategoryData): Promise<Catego
 
   } catch (error) {
     console.error(`[CategoryService] Error adding category "${trimmedName}" to Firestore: `, error);
-     if (error instanceof Error && error.message.includes("already exists")) {
-      throw error; 
+    if (error instanceof Error && error.message.includes("already exists")) {
+      throw error; // Re-throw the specific "already exists" error
     }
-    if (error instanceof Error) {
-        console.error("  [CategoryService] Firestore Error Name (addCategory): ", error.name);
-        console.error("  [CategoryService] Firestore Error Message (addCategory): ", error.message);
-        // @ts-ignore
-        if (error.code) console.error("  [CategoryService] Firestore Error Code (addCategory): ", error.code);
-    }
-    throw new Error(`Failed to add category "${trimmedName}" to Firestore. Check server logs and Firestore security rules. Details: ${(error as Error).message}`);
+    const originalError = error as any;
+    const errorMessage = `CategoryService Error (addCategory: ${trimmedName}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
 export async function deleteCategory(categoryId: string): Promise<void> {
   console.log(`[CategoryService] Attempting to delete category ${categoryId}`);
   if (!db) {
-    console.error("[CategoryService] CRITICAL: Firestore db instance is not available for deleteCategory. Check Firebase initialization.");
-    throw new Error("Firestore database is not initialized. Cannot delete category.");
+    const errorMsg = "[CategoryService] CRITICAL: Firestore db instance is not available for deleteCategory. Check Firebase initialization.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
   try {
     const categoryRef = doc(db, CATEGORIES_COLLECTION, categoryId);
@@ -159,58 +164,53 @@ export async function deleteCategory(categoryId: string): Promise<void> {
     console.log(`[CategoryService] Category ${categoryId} deleted successfully from Firestore.`);
   } catch (error) {
     console.error(`[CategoryService] Error deleting category ${categoryId} from Firestore: `, error);
-    if (error instanceof Error) {
-        console.error("  [CategoryService] Firestore Error Name (deleteCategory): ", error.name);
-        console.error("  [CategoryService] Firestore Error Message (deleteCategory): ", error.message);
-        // @ts-ignore
-        if (error.code) console.error("  [CategoryService] Firestore Error Code (deleteCategory): ", error.code);
-    }
-    throw new Error(`Failed to delete category ${categoryId} from Firestore. Check server logs. Details: ${(error as Error).message}`);
+    const originalError = error as any;
+    const errorMessage = `CategoryService Error (deleteCategory: ${categoryId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
 
 export async function updateCategory(categoryId: string, updates: Partial<Omit<Category, 'id' | 'nameLower' | 'createdAt' | 'updatedAt'>> & { name?: string }): Promise<Category> {
   console.log(`[CategoryService] Attempting to update category ${categoryId} with:`, updates);
   if (!db) {
-    console.error("[CategoryService] CRITICAL: Firestore db instance is not available for updateCategory. Check Firebase initialization.");
-    throw new Error("Firestore database is not initialized. Cannot update category.");
+    const errorMsg = "[CategoryService] CRITICAL: Firestore db instance is not available for updateCategory. Check Firebase initialization.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
   }
   
   const trimmedUpdateName = updates.name ? updates.name.trim() : undefined;
 
   if (updates.name !== undefined && trimmedUpdateName === "") { 
-    console.error("[CategoryService] Validation Error: Category name cannot be empty for update.");
-    throw new Error("Category name cannot be empty for update.");
+    const validationError = "[CategoryService] Validation Error: Category name cannot be empty for update.";
+    console.error(validationError);
+    throw new Error(validationError);
   }
 
   try {
     const categoryRef = doc(db, CATEGORIES_COLLECTION, categoryId);
     const updatePayload: any = { ...updates };
     
-    if (trimmedUpdateName && updates.name) { // only update nameLower if name is actually being changed
+    if (trimmedUpdateName && updates.name) { 
       const newNameLower = trimmedUpdateName.toLowerCase();
       const qCheck = query(collection(db, CATEGORIES_COLLECTION), where("nameLower", "==", newNameLower));
       const querySnapshot = await getDocs(qCheck);
       if (!querySnapshot.empty && querySnapshot.docs.some(doc => doc.id !== categoryId)) {
-        console.warn(`[CategoryService] Another category with the name "${trimmedUpdateName}" already exists.`);
+        const duplicateError = `[CategoryService] Another category with the name "${trimmedUpdateName}" already exists.`;
+        console.warn(duplicateError);
         throw new Error(`Another category with the name "${trimmedUpdateName}" already exists.`);
       }
       updatePayload.name = trimmedUpdateName;
       updatePayload.nameLower = newNameLower;
-    } else if (updates.name === undefined) {
-      delete updatePayload.name; // Ensure name is not accidentally set to undefined if not provided
+    } else if (updates.name === undefined && 'name' in updates) {
+        // If name is explicitly set to undefined in updates, it's a problem unless we want to allow unnamed categories (which we don't)
+        // If 'name' is not in updates, it means it's not being changed, so we don't touch updatePayload.name or nameLower
+        delete updatePayload.name; // remove if it was set to undefined
     }
     
-    if (updates.icon === undefined && 'icon' in updates) { // if icon is explicitly passed as undefined, and you want to remove it.
-      // Firestore's updateDoc with { icon: undefined } might not remove the field.
-      // To explicitly remove, you might need `deleteField()` from 'firebase/firestore',
-      // or just ensure it's set to an empty string if that's your convention for "no icon".
-      // For now, if icon is in updates, it's updated. If not, it's untouched.
-      // If you want to be able to set icon to empty string, that's fine.
-    } else if (!('icon' in updates)) {
+    if (!('icon' in updates)) {
         delete updatePayload.icon;
     }
-
 
     updatePayload.updatedAt = serverTimestamp();
 
@@ -219,8 +219,9 @@ export async function updateCategory(categoryId: string, updates: Partial<Omit<C
     
     const updatedDocSnapshot = await getDoc(categoryRef);
     if (!updatedDocSnapshot.exists()) {
-        console.error(`[CategoryService] Category with ID ${categoryId} not found after update.`);
-        throw new Error(`Category with ID ${categoryId} not found after update.`);
+        const fetchError = `[CategoryService] Category with ID ${categoryId} not found after update.`;
+        console.error(fetchError);
+        throw new Error(fetchError);
     }
     const updatedCategoryData = updatedDocSnapshot.data();
     return { 
@@ -231,15 +232,12 @@ export async function updateCategory(categoryId: string, updates: Partial<Omit<C
     } as Category;
   } catch (error) {
     console.error(`[CategoryService] Error updating category ${categoryId} in Firestore: `, error);
-    if (error instanceof Error && error.message.includes("already exists")) {
+     if (error instanceof Error && error.message.includes("already exists")) {
       throw error; 
     }
-    if (error instanceof Error) {
-        console.error("  [CategoryService] Firestore Error Name (updateCategory): ", error.name);
-        console.error("  [CategoryService] Firestore Error Message (updateCategory): ", error.message);
-        // @ts-ignore
-        if (error.code) console.error("  [CategoryService] Firestore Error Code (updateCategory): ", error.code);
-    }
-    throw new Error(`Failed to update category "${trimmedUpdateName || categoryId}" in Firestore. Details: ${(error as Error).message}`);
+    const originalError = error as any;
+    const errorMessage = `CategoryService Error (updateCategory: ${categoryId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
   }
 }
