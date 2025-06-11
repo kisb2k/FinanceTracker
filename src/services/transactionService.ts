@@ -27,6 +27,7 @@ const transactionFromDoc = (docSnapshot: any): Transaction => {
     id: docSnapshot.id,
     ...data,
     date: data.date instanceof Timestamp ? data.date.toDate().toISOString().split('T')[0] : data.date,
+    loadDateTime: data.loadDateTime instanceof Timestamp ? data.loadDateTime.toDate().toISOString() : data.loadDateTime,
     createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate().toISOString() : data.createdAt,
     updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt,
   } as Transaction;
@@ -42,14 +43,11 @@ export async function getTransactions(accountId?: string): Promise<Transaction[]
   }
   try {
     const transactionsCollection = collection(db, TRANSACTIONS_COLLECTION);
-    // Firestore queries require an index if you order by a field and then filter on another, or order by multiple fields.
-    // For just ordering by date, then by creation time (if dates are same), this should be fine.
-    // If accountId filtering is added here later, a composite index might be needed.
     const q = query(transactionsCollection, orderBy("date", "desc"), orderBy("createdAt", "desc"));
-    
+
     const transactionSnapshot = await getDocs(q);
     const transactionList = transactionSnapshot.docs.map(transactionFromDoc);
-    
+
     console.log(`[TransactionService] Successfully fetched ${transactionList.length} transactions.`);
      if (transactionList.length === 0) {
       console.log("[TransactionService] No transactions found in Firestore. The 'transactions' collection might be empty or does not exist yet (it will be created on first add).");
@@ -58,13 +56,13 @@ export async function getTransactions(accountId?: string): Promise<Transaction[]
   } catch (error) {
     console.error("======================================================================");
     console.error("[TransactionService] CRITICAL ERROR FETCHING TRANSACTIONS FROM FIRESTORE:");
-    const originalError = error as any; 
+    const originalError = error as any;
     console.error("[TransactionService] Original Firestore Error Object (see details below):", originalError);
-    if (originalError instanceof Error) { 
+    if (originalError instanceof Error) {
         console.error("  [TransactionService] Firestore Error Name: ", originalError.name);
         console.error("  [TransactionService] Firestore Error Message: ", originalError.message);
     }
-    if (originalError.code) { 
+    if (originalError.code) {
       console.error("  [TransactionService] Firestore Error Code: ", originalError.code);
        if (originalError.code === 'permission-denied') {
         console.error("  [TransactionService] Hint: 'permission-denied' usually means your Firestore security rules are blocking access. Please verify them in the Firebase console for the 'transactions' collection. Rules should be permissive for development (e.g., allow read: if true;).");
@@ -82,7 +80,7 @@ export async function getTransactions(accountId?: string): Promise<Transaction[]
   }
 }
 
-export type AddTransactionData = Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt' | 'loadDateTime' | 'fileName'>;
+export type AddTransactionData = Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt' | 'loadDateTime' | 'uploadedBy' | 'fileName'>;
 
 export async function addTransaction(transactionData: AddTransactionData): Promise<Transaction> {
   console.log('[TransactionService] Attempting to add transaction:', transactionData.description);
@@ -101,7 +99,9 @@ export async function addTransaction(transactionData: AddTransactionData): Promi
       ...transactionData,
       amount: amount,
       isDebit: amount < 0,
-      date: transactionData.date, // Ensure date is in YYYY-MM-DD string format or Firestore Timestamp
+      date: transactionData.date,
+      loadDateTime: new Date().toISOString(),
+      uploadedBy: "System User", // Placeholder for actual user logic
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -118,7 +118,7 @@ export async function addTransaction(transactionData: AddTransactionData): Promi
   }
 }
 
-export type UpdateTransactionData = Partial<Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt'>>;
+export type UpdateTransactionData = Partial<Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt' | 'loadDateTime' | 'uploadedBy' | 'fileName'>>;
 
 export async function updateTransaction(transactionId: string, updates: UpdateTransactionData): Promise<Transaction> {
   console.log(`[TransactionService] Attempting to update transaction ${transactionId} with:`, updates);
@@ -129,7 +129,7 @@ export async function updateTransaction(transactionId: string, updates: UpdateTr
   }
   try {
     const transactionRef = doc(db, TRANSACTIONS_COLLECTION, transactionId);
-    
+
     const updatePayload: any = { ...updates };
     if (updates.amount !== undefined) {
       const amount = parseFloat(String(updates.amount));
@@ -138,7 +138,7 @@ export async function updateTransaction(transactionId: string, updates: UpdateTr
       updatePayload.isDebit = amount < 0;
     }
     if (updates.date) {
-        updatePayload.date = updates.date; // Ensure date is in YYYY-MM-DD string format or Firestore Timestamp
+        updatePayload.date = updates.date;
     }
     updatePayload.updatedAt = serverTimestamp();
 
@@ -188,7 +188,6 @@ export async function deleteMultipleTransactions(transactionIds: string[]): Prom
     return;
   }
   if (transactionIds.length > 500) {
-      // Firestore batch limit, though client-side might enforce lower for UX
       console.warn(`[TransactionService] Attempting to delete ${transactionIds.length} transactions, which exceeds typical batch limits. Consider splitting into smaller batches if issues arise.`);
   }
 

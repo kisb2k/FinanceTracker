@@ -2,6 +2,7 @@
 'use client';
 
 import { useState, ChangeEvent, FormEvent, useEffect } from 'react';
+import Link from 'next/link'; // Added missing import
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -35,7 +36,7 @@ export default function ImportTransactionsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
-  
+
   const [importStep, setImportStep] = useState<ImportStep>('upload');
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvPreview, setCsvPreview] = useState<CsvRow[]>([]);
@@ -104,8 +105,8 @@ export default function ImportTransactionsPage() {
     setError(null);
     setProgressValue(10);
 
-    parseCsvPreview(selectedFile); 
-    
+    parseCsvPreview(selectedFile);
+
     try {
       const reader = new FileReader();
       reader.onload = async (e) => {
@@ -116,7 +117,6 @@ export default function ImportTransactionsPage() {
             if (aiResult && Array.isArray(aiResult.columnMappings)) {
               const newColumnMap = aiResult.columnMappings.reduce((acc, mapping: MappingEntry) => {
                 if (mapping.csvHeader) {
-                  // Ensure that an empty transactionField (meaning AI suggests unmapped) is stored as an empty string
                   acc[mapping.csvHeader] = mapping.transactionField || '';
                 }
                 return acc;
@@ -130,7 +130,7 @@ export default function ImportTransactionsPage() {
             console.error("AI Mapping Error:", aiMapError);
             setError('AI column mapping failed. Please map columns manually or verify CSV format.');
             toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
-            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {}); // Default to unmapped
+            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {});
             setColumnMap(fallbackMap);
         }
         setProgressValue(50);
@@ -161,7 +161,7 @@ export default function ImportTransactionsPage() {
       setError('File, account, and column mappings are required.');
       return;
     }
-     const mappedFieldsPresent = expectedTransactionFields.every(field => 
+     const mappedFieldsPresent = expectedTransactionFields.every(field =>
       Object.values(columnMap).includes(field)
     );
     if (!mappedFieldsPresent && !Object.values(columnMap).some(val => val !== '')) {
@@ -176,8 +176,8 @@ export default function ImportTransactionsPage() {
     setProgressValue(70);
 
     console.log('Importing with:', { fileName: selectedFile.name, accountId: selectedAccountId, columnMap });
-    
-    await new Promise(resolve => setTimeout(resolve, 1500)); 
+
+    await new Promise(resolve => setTimeout(resolve, 1500));
 
     const transactionsImportedCount = csvPreview.length > 0 ? csvPreview.length : Math.floor(Math.random() * 50) + 1;
     const accountForImport = accounts.find(a=>a.id === selectedAccountId);
@@ -186,7 +186,7 @@ export default function ImportTransactionsPage() {
     setIsLoading(false);
     setProgressValue(100);
   };
-  
+
   const resetForm = () => {
     setSelectedFile(null);
     setSelectedAccountId('');
@@ -209,7 +209,7 @@ export default function ImportTransactionsPage() {
             <Button variant="outline" onClick={resetForm}>Start New Import</Button>
         )}
       </div>
-      
+
       {importStep !== 'complete' && <Progress value={progressValue} className="w-full mb-4" />}
 
       {error && (
@@ -236,14 +236,14 @@ export default function ImportTransactionsPage() {
           <CardContent className="space-y-6">
             <div className="space-y-2">
               <Label htmlFor="account-select">Account</Label>
-              <Select 
-                value={selectedAccountId} 
+              <Select
+                value={selectedAccountId}
                 onValueChange={setSelectedAccountId}
                 disabled={isAccountsLoading || !!accountsError || accounts.length === 0}
               >
                 <SelectTrigger id="account-select">
                   <SelectValue placeholder={
-                    isAccountsLoading ? "Loading accounts..." : 
+                    isAccountsLoading ? "Loading accounts..." :
                     accountsError ? "Error loading accounts" :
                     accounts.length === 0 ? "No accounts available" :
                     "Select an account"
@@ -276,8 +276,8 @@ export default function ImportTransactionsPage() {
             </div>
           </CardContent>
           <CardFooter className="justify-end">
-            <Button 
-              onClick={handleProceedToMapping} 
+            <Button
+              onClick={handleProceedToMapping}
               disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!accountsError}
             >
               {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
@@ -312,8 +312,8 @@ export default function ImportTransactionsPage() {
                       <TableRow key={`${header}-${index}`}>
                         <TableCell className="font-medium">{header}</TableCell>
                         <TableCell>
-                          <Select 
-                            value={columnMap[header] || UNMAPPED_PLACEHOLDER_VALUE} 
+                          <Select
+                            value={columnMap[header] || UNMAPPED_PLACEHOLDER_VALUE}
                             onValueChange={(value) => handleColumnMapChange(header, value)}
                           >
                             <SelectTrigger>
@@ -358,7 +358,7 @@ export default function ImportTransactionsPage() {
           </form>
         </Card>
       )}
-      
+
       {importStep === 'complete' && (
          <Card className="shadow-lg">
             <CardHeader>
@@ -377,4 +377,3 @@ export default function ImportTransactionsPage() {
     </div>
   );
 }
-

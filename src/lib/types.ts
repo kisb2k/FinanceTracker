@@ -5,9 +5,9 @@ export interface Account {
   id: string;
   name: string;
   type: AccountType;
-  balance: number; 
-  currency: string; 
-  lastImported?: string; 
+  balance: number;
+  currency: string;
+  lastImported?: string;
   createdAt?: string | Date; // Keep as string for ISO dates from Firestore or Date for serverTimestamp
   updatedAt?: string | Date;
 }
@@ -17,11 +17,12 @@ export interface Transaction {
   accountId: string;
   date: string; // Should be YYYY-MM-DD string for input, stored as ISO string or Timestamp
   description: string;
-  amount: number; 
+  amount: number;
   category: string; // Store category NAME
   isDebit: boolean;
   fileName?: string; // From import
-  loadDateTime?: string; // From import
+  loadDateTime?: string; // Will be set on creation, stored as ISO string
+  uploadedBy?: string; // Will be set on creation
   createdAt?: string | Date;
   updatedAt?: string | Date;
 }
@@ -30,7 +31,7 @@ export interface Category {
   id: string;
   name: string;
   nameLower?: string; // For case-insensitive checks
-  icon?: string; 
+  icon?: string;
   createdAt?: string | Date;
   updatedAt?: string | Date;
 }
