@@ -2,7 +2,7 @@
 'use client';
 
 import { useState, ChangeEvent, FormEvent, useEffect } from 'react';
-import Link from 'next/link'; // Added missing import
+import Link from 'next/link';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,8 +14,10 @@ import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight
 import type { Account } from '@/lib/types';
 import { mapCsvColumns, type MapCsvColumnsOutput, type MappingEntry } from '@/ai/flows/map-csv-columns';
 import { Progress } from '@/components/ui/progress';
-import { getAccounts } from '@/services/accountService';
+import { getAccounts, updateAccountLastImported } from '@/services/accountService';
+import { addTransaction, type AddTransactionData } from '@/services/transactionService';
 import { useToast } from '@/hooks/use-toast';
+import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
@@ -36,6 +38,7 @@ export default function ImportTransactionsPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [importErrors, setImportErrors] = useState<string[]>([]);
 
   const [importStep, setImportStep] = useState<ImportStep>('upload');
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
@@ -79,7 +82,7 @@ export default function ImportTransactionsPage() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      const lines = text.split(/\r\n|\n|\r/).slice(0, 6); // Handle different line endings
+      const lines = text.split(/\r\n|\n|\r/).slice(0, 6); 
       if (lines.length > 0) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
         setCsvHeaders(headers);
@@ -116,11 +119,17 @@ export default function ImportTransactionsPage() {
             const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\r\n|\n|\r/).slice(0, 10).join('\\n') });
             if (aiResult && Array.isArray(aiResult.columnMappings)) {
               const newColumnMap = aiResult.columnMappings.reduce((acc, mapping: MappingEntry) => {
-                if (mapping.csvHeader) {
+                if (mapping.csvHeader && csvHeaders.includes(mapping.csvHeader)) { // Ensure AI mapped header exists in actual CSV
                   acc[mapping.csvHeader] = mapping.transactionField || '';
                 }
                 return acc;
               }, {} as Record<string, string>);
+              // Ensure all actual headers have an entry, even if unmapped by AI
+              csvHeaders.forEach(header => {
+                if (!(header in newColumnMap)) {
+                    newColumnMap[header] = '';
+                }
+              });
               setColumnMap(newColumnMap);
               toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
             } else {
@@ -155,36 +164,147 @@ export default function ImportTransactionsPage() {
     setColumnMap(prev => ({ ...prev, [csvHeader]: transactionField === UNMAPPED_PLACEHOLDER_VALUE ? "" : transactionField }));
   };
 
+  // Helper to parse date string from CSV - very basic, extend as needed
+  const parseDateString = (dateStr: string): string | null => {
+    if (!dateStr) return null;
+    // Attempt to parse common formats, default to YYYY-MM-DD if direct
+    const commonFormats = ['MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy'];
+    for (const fmt of commonFormats) {
+        try {
+            const parsed = parseDateFns(dateStr, fmt, new Date());
+            if (!isNaN(parsed.valueOf())) return formatDateFns(parsed, 'yyyy-MM-dd');
+        } catch (e) { /* try next format */ }
+    }
+    // Fallback for ISO-like strings or directly YYYY-MM-DD
+    try {
+        const parsed = new Date(dateStr);
+        if (!isNaN(parsed.valueOf())) return formatDateFns(parsed, 'yyyy-MM-dd');
+    } catch(e) { /* give up */ }
+    
+    console.warn(`Could not parse date: ${dateStr}`);
+    return null; 
+  };
+
+
   const handleSubmitImport = async (event: FormEvent) => {
     event.preventDefault();
     if (!selectedFile || !selectedAccountId || Object.keys(columnMap).length === 0) {
       setError('File, account, and column mappings are required.');
       return;
     }
-     const mappedFieldsPresent = expectedTransactionFields.every(field =>
-      Object.values(columnMap).includes(field)
-    );
-    if (!mappedFieldsPresent && !Object.values(columnMap).some(val => val !== '')) {
+    
+    const mappedFields = Object.values(columnMap).filter(field => field !== '');
+    if (mappedFields.length === 0) {
        setError('Please map at least one CSV column to a transaction field.');
        return;
     }
-
+    if (!mappedFields.includes('date') || !mappedFields.includes('amount') || !mappedFields.includes('description')) {
+        setError('Essential fields (date, amount, description) must be mapped.');
+        return;
+    }
 
     setIsLoading(true);
     setError(null);
     setSuccessMessage(null);
-    setProgressValue(70);
+    setImportErrors([]);
+    setProgressValue(60);
 
-    console.log('Importing with:', { fileName: selectedFile.name, accountId: selectedAccountId, columnMap });
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const fileContent = e.target?.result as string;
+      const lines = fileContent.split(/\r\n|\n|\r/).filter(line => line.trim() !== '');
+      if (lines.length < 2) { // Must have header + at least one data row
+        setError("CSV file is empty or has no data rows.");
+        setIsLoading(false);
+        setProgressValue(0);
+        return;
+      }
 
-    await new Promise(resolve => setTimeout(resolve, 1500));
+      const fileHeaders = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+      const dataRows = lines.slice(1);
+      let importedCount = 0;
+      let localImportErrors: string[] = [];
 
-    const transactionsImportedCount = csvPreview.length > 0 ? csvPreview.length : Math.floor(Math.random() * 50) + 1;
-    const accountForImport = accounts.find(a=>a.id === selectedAccountId);
-    setSuccessMessage(`${transactionsImportedCount} transactions (previewed/simulated) would be imported for account ${accountForImport?.name}. Full import logic pending.`);
-    setImportStep('complete');
-    setIsLoading(false);
-    setProgressValue(100);
+      for (let i = 0; i < dataRows.length; i++) {
+        const rowString = dataRows[i];
+        const rowValues = rowString.split(',').map(v => v.trim().replace(/"/g, ''));
+        const rowData: Record<string, string> = fileHeaders.reduce((obj, header, index) => {
+          obj[header] = rowValues[index] || '';
+          return obj;
+        }, {} as Record<string, string>);
+
+        const transactionDateStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'date') || ''];
+        const transactionDescriptionStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'description') || ''];
+        const transactionAmountStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'amount') || ''];
+        const transactionCategoryStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'category') || ''] || 'Uncategorized';
+        
+        const parsedDate = parseDateString(transactionDateStr);
+        const parsedAmount = parseFloat(transactionAmountStr);
+
+        if (!parsedDate) {
+          localImportErrors.push(`Row ${i + 1}: Invalid or unparseable date "${transactionDateStr}". Skipping.`);
+          continue;
+        }
+        if (isNaN(parsedAmount)) {
+          localImportErrors.push(`Row ${i + 1}: Invalid amount "${transactionAmountStr}". Skipping.`);
+          continue;
+        }
+        if (!transactionDescriptionStr) {
+          localImportErrors.push(`Row ${i + 1}: Missing description. Skipping.`);
+          continue;
+        }
+
+        const transactionToImport: AddTransactionData = {
+          accountId: selectedAccountId,
+          date: parsedDate,
+          description: transactionDescriptionStr,
+          amount: parsedAmount,
+          category: transactionCategoryStr,
+          fileName: selectedFile.name,
+        };
+
+        try {
+          await addTransaction(transactionToImport);
+          importedCount++;
+        } catch (txError) {
+          localImportErrors.push(`Row ${i + 1} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
+        }
+        setProgressValue(60 + Math.floor(((i + 1) / dataRows.length) * 35)); // 60% to 95% for this part
+      }
+
+      if (importedCount > 0) {
+        try {
+            await updateAccountLastImported(selectedAccountId);
+        } catch (accUpdateError) {
+            localImportErrors.push(`Failed to update account's last import date: ${(accUpdateError as Error).message}`);
+        }
+        setSuccessMessage(`${importedCount} transaction(s) imported successfully for account ${accounts.find(a=>a.id === selectedAccountId)?.name}.`);
+      } else if (localImportErrors.length > 0 && importedCount === 0) {
+         setError(`No transactions were imported. See errors below.`);
+      } else if (localImportErrors.length === 0 && importedCount === 0 && dataRows.length > 0) {
+         setError(`No transactions were imported. The file might have been processed, but no valid transactions were found or created.`);
+      } else if (dataRows.length === 0) {
+         setError(`No data rows found in the CSV file after the header.`);
+      }
+
+
+      setImportErrors(localImportErrors);
+      setImportStep('complete');
+      setIsLoading(false);
+      setProgressValue(100);
+      toast({
+        title: importedCount > 0 ? "Import Complete" : "Import Finished with Issues",
+        description: importedCount > 0 ? `${importedCount} transactions imported.` : `Import failed or had issues. Check messages.`,
+        variant: importedCount > 0 && localImportErrors.length === 0 ? "default" : "destructive"
+      });
+
+    };
+    reader.onerror = () => {
+      setError("Failed to read the selected file for final import.");
+      setIsLoading(false);
+      setProgressValue(0);
+    };
+    reader.readAsText(selectedFile);
   };
 
   const resetForm = () => {
@@ -192,6 +312,7 @@ export default function ImportTransactionsPage() {
     setSelectedAccountId('');
     setError(null);
     setSuccessMessage(null);
+    setImportErrors([]);
     setImportStep('upload');
     setCsvHeaders([]);
     setCsvPreview([]);
@@ -222,10 +343,23 @@ export default function ImportTransactionsPage() {
       {successMessage && importStep === 'complete' && (
         <Alert variant="default" className="bg-green-50 border-green-200 text-green-700 dark:bg-green-900/30 dark:border-green-700 dark:text-green-400">
           <CheckCircle className="h-4 w-4 !text-green-500" />
-          <AlertTitle>Import Process Simulated!</AlertTitle>
+          <AlertTitle>Import Process Finished!</AlertTitle>
           <AlertDescription>{successMessage}</AlertDescription>
         </Alert>
       )}
+      {importErrors.length > 0 && importStep === 'complete' && (
+        <Alert variant="destructive" className="mt-4">
+            <XCircle className="h-4 w-4"/>
+            <AlertTitle>Import Issues ({importErrors.length})</AlertTitle>
+            <AlertDescription>
+                <ul className="list-disc list-inside max-h-40 overflow-y-auto">
+                    {importErrors.slice(0,10).map((err, idx) => <li key={idx}>{err}</li>)}
+                    {importErrors.length > 10 && <li>And {importErrors.length-10} more errors...</li>}
+                </ul>
+            </AlertDescription>
+        </Alert>
+      )}
+
 
       {importStep === 'upload' && (
         <Card className="shadow-lg">
@@ -352,7 +486,7 @@ export default function ImportTransactionsPage() {
                <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); }}>Back</Button>
                <Button type="submit" disabled={isLoading}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-                Confirm and Import (Simulated)
+                Confirm and Import
               </Button>
             </CardFooter>
           </form>
@@ -362,10 +496,10 @@ export default function ImportTransactionsPage() {
       {importStep === 'complete' && (
          <Card className="shadow-lg">
             <CardHeader>
-                <CardTitle>Import Process Finished (Simulation)</CardTitle>
+                <CardTitle>Import Process Finished</CardTitle>
             </CardHeader>
             <CardContent>
-                <p className="mb-4">The import process simulation is complete.</p>
+                <p className="mb-4">The import process is complete. Review any messages above for details.</p>
             </CardContent>
             <CardFooter className="flex flex-col sm:flex-row justify-between gap-2">
                 <Button variant="outline" onClick={resetForm}>Import Another File</Button>

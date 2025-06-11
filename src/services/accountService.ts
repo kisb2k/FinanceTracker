@@ -12,7 +12,8 @@ import {
   deleteDoc,
   query,
   orderBy,
-  getDoc
+  getDoc,
+  serverTimestamp
 } from 'firebase/firestore';
 
 const ACCOUNTS_COLLECTION = 'accounts';
@@ -59,12 +60,25 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
       type: accountData.type,
       currency: accountData.currency,
       balance: accountData.type === 'credit' ? -Math.abs(balance) : Math.abs(balance),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
     };
     console.log('[AccountService] Payload to be added to Firestore:', newAccountPayload);
     const docRef = await addDoc(collection(db, ACCOUNTS_COLLECTION), newAccountPayload);
     console.log('[AccountService] Account added successfully to Firestore with ID:', docRef.id);
     
-    return { id: docRef.id, ...newAccountPayload } as Account;
+    const newDoc = await getDoc(docRef);
+     if (!newDoc.exists()) {
+        throw new Error(`Failed to retrieve newly added account with ID ${docRef.id}.`);
+    }
+    const newAccountData = newDoc.data();
+    return { 
+        id: newDoc.id, 
+        ...newAccountData,
+        createdAt: newAccountData.createdAt?.toDate().toISOString(), // Convert Timestamps
+        updatedAt: newAccountData.updatedAt?.toDate().toISOString()
+    } as Account;
+
   } catch (error) {
     console.error(`[AccountService] Error adding account "${accountData.name}" to Firestore: `, error);
     const originalError = error as any;
@@ -74,7 +88,7 @@ export async function addAccount(accountData: AddAccountData): Promise<Account> 
   }
 }
 
-export type UpdateAccountData = Partial<Omit<Account, 'id' | 'type'>>;
+export type UpdateAccountData = Partial<Omit<Account, 'id' | 'type' | 'createdAt' | 'updatedAt'>>;
 
 export async function updateAccount(accountId: string, updates: UpdateAccountData): Promise<Account> {
    console.log(`[AccountService] Attempting to update account ${accountId} with:`, updates);
@@ -85,18 +99,48 @@ export async function updateAccount(accountId: string, updates: UpdateAccountDat
   }
    try {
     const accountRef = doc(db, ACCOUNTS_COLLECTION, accountId);
-    await updateDoc(accountRef, updates);
+    const updatePayload = { ...updates, updatedAt: serverTimestamp() };
+    await updateDoc(accountRef, updatePayload);
     console.log(`[AccountService] Account ${accountId} updated successfully in Firestore.`);
     
     const updatedDoc = await getDoc(accountRef);
     if (!updatedDoc.exists()) {
         throw new Error(`Account with ID ${accountId} not found after update.`);
     }
-    return { id: updatedDoc.id, ...updatedDoc.data() } as Account;
+    const updatedData = updatedDoc.data();
+    return { 
+        id: updatedDoc.id, 
+        ...updatedData,
+        createdAt: updatedData.createdAt?.toDate().toISOString(),
+        updatedAt: updatedData.updatedAt?.toDate().toISOString() 
+    } as Account;
   } catch (error) {
     console.error(`[AccountService] Error updating account ${accountId} in Firestore: `, error);
     const originalError = error as any;
     const errorMessage = `AccountService Error (updateAccount: ${accountId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS (Google Cloud Logging for Firebase App Hosting) for full details.** Common issues: Firestore security rules.`;
+    console.error(errorMessage);
+    throw new Error(errorMessage);
+  }
+}
+
+export async function updateAccountLastImported(accountId: string): Promise<void> {
+  console.log(`[AccountService] Attempting to update lastImported for account ${accountId}`);
+  if (!db) {
+    const errorMsg = "[AccountService] Firestore db instance is NOT AVAILABLE for updateAccountLastImported. Critical configuration issue.";
+    console.error(errorMsg);
+    throw new Error(errorMsg);
+  }
+  try {
+    const accountRef = doc(db, ACCOUNTS_COLLECTION, accountId);
+    await updateDoc(accountRef, {
+      lastImported: new Date().toISOString(),
+      updatedAt: serverTimestamp()
+    });
+    console.log(`[AccountService] Account ${accountId} lastImported updated successfully.`);
+  } catch (error) {
+    console.error(`[AccountService] Error updating lastImported for account ${accountId}: `, error);
+    const originalError = error as any;
+    const errorMessage = `AccountService Error (updateAccountLastImported: ${accountId}): ${originalError.name || 'Unknown Error'} (Code: ${originalError.code || 'N/A'}) - ${originalError.message || 'No message'}. **CHECK SERVER LOGS for full details.**`;
     console.error(errorMessage);
     throw new Error(errorMessage);
   }

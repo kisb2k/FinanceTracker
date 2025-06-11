@@ -26,7 +26,7 @@ const transactionFromDoc = (docSnapshot: any): Transaction => {
   return {
     id: docSnapshot.id,
     ...data,
-    date: data.date instanceof Timestamp ? data.date.toDate().toISOString().split('T')[0] : data.date,
+    date: data.date instanceof Timestamp ? data.date.toDate().toISOString().split('T')[0] : data.date, // Ensure date is YYYY-MM-DD
     loadDateTime: data.loadDateTime instanceof Timestamp ? data.loadDateTime.toDate().toISOString() : data.loadDateTime,
     createdAt: data.createdAt instanceof Timestamp ? data.createdAt.toDate().toISOString() : data.createdAt,
     updatedAt: data.updatedAt instanceof Timestamp ? data.updatedAt.toDate().toISOString() : data.updatedAt,
@@ -43,6 +43,7 @@ export async function getTransactions(accountId?: string): Promise<Transaction[]
   }
   try {
     const transactionsCollection = collection(db, TRANSACTIONS_COLLECTION);
+    // Simplified query for now, ensure this index exists or adjust if needed
     const q = query(transactionsCollection, orderBy("date", "desc"), orderBy("createdAt", "desc"));
 
     const transactionSnapshot = await getDocs(q);
@@ -80,10 +81,10 @@ export async function getTransactions(accountId?: string): Promise<Transaction[]
   }
 }
 
-export type AddTransactionData = Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt' | 'loadDateTime' | 'uploadedBy' | 'fileName'>;
+export type AddTransactionData = Omit<Transaction, 'id' | 'isDebit' | 'createdAt' | 'updatedAt' | 'loadDateTime' | 'uploadedBy'> & { fileName?: string };
 
 export async function addTransaction(transactionData: AddTransactionData): Promise<Transaction> {
-  console.log('[TransactionService] Attempting to add transaction:', transactionData.description);
+  console.log('[TransactionService] Attempting to add transaction:', transactionData.description, 'File:', transactionData.fileName);
   if (!db) {
     const errorMsg = "[TransactionService] CRITICAL: Firestore db instance is not available for addTransaction.";
     console.error(errorMsg);
@@ -99,9 +100,10 @@ export async function addTransaction(transactionData: AddTransactionData): Promi
       ...transactionData,
       amount: amount,
       isDebit: amount < 0,
-      date: transactionData.date,
+      date: transactionData.date, // Ensure date is in YYYY-MM-DD string format
       loadDateTime: new Date().toISOString(),
       uploadedBy: "System User", // Placeholder for actual user logic
+      fileName: transactionData.fileName || null, // Store fileName
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };

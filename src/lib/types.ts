@@ -7,22 +7,22 @@ export interface Account {
   type: AccountType;
   balance: number;
   currency: string;
-  lastImported?: string;
-  createdAt?: string | Date; // Keep as string for ISO dates from Firestore or Date for serverTimestamp
+  lastImported?: string; // ISO string date
+  createdAt?: string | Date; 
   updatedAt?: string | Date;
 }
 
 export interface Transaction {
   id: string;
   accountId: string;
-  date: string; // Should be YYYY-MM-DD string for input, stored as ISO string or Timestamp
+  date: string; 
   description: string;
   amount: number;
-  category: string; // Store category NAME
+  category: string; 
   isDebit: boolean;
-  fileName?: string; // From import
-  loadDateTime?: string; // Will be set on creation, stored as ISO string
-  uploadedBy?: string; // Will be set on creation
+  fileName?: string; 
+  loadDateTime?: string; // ISO string date
+  uploadedBy?: string; 
   createdAt?: string | Date;
   updatedAt?: string | Date;
 }
@@ -30,14 +30,14 @@ export interface Transaction {
 export interface Category {
   id: string;
   name: string;
-  nameLower?: string; // For case-insensitive checks
+  nameLower?: string; 
   icon?: string;
   createdAt?: string | Date;
   updatedAt?: string | Date;
 }
 
 export interface BudgetCategoryLimit {
-  categoryId: string; // Links to Category.id
+  categoryId: string; 
   limit: number;
 }
 
@@ -45,7 +45,7 @@ export interface Budget {
   id:string;
   name: string;
   isDefault: boolean;
-  timePeriod: 'monthly' | 'yearly'; // Simplified from 'quarterly'
+  timePeriod: 'monthly' | 'yearly'; 
   categoryLimits: BudgetCategoryLimit[];
   totalBudgetAmount?: number;
   createdAt?: string | Date;
