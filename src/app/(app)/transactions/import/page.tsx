@@ -77,7 +77,7 @@ export default function ImportTransactionsPage() {
     const reader = new FileReader();
     reader.onload = (e) => {
       const text = e.target?.result as string;
-      const lines = text.split(/\\r\\n|\\n|\\r/).slice(0, 6); // Handle different line endings
+      const lines = text.split(/\r\n|\n|\r/).slice(0, 6); // Handle different line endings
       if (lines.length > 0) {
         const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
         setCsvHeaders(headers);
@@ -111,7 +111,7 @@ export default function ImportTransactionsPage() {
         const csvDataContent = e.target?.result as string;
         setProgressValue(30);
         try {
-            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\\r\\n|\\n|\\r/).slice(0, 10).join('\\n') }); // Send headers + few rows
+            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\r\n|\n|\r/).slice(0, 10).join('\\n') }); // Send headers + few rows
             if (aiResult && aiResult.columnMappings) {
               const newColumnMap = aiResult.columnMappings.reduce((acc, mapping) => {
                 if (mapping.csvHeader) {
@@ -313,8 +313,8 @@ export default function ImportTransactionsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {csvHeaders.map(header => (
-                      <TableRow key={header}>
+                    {csvHeaders.map((header, index) => (
+                      <TableRow key={`${header}-${index}`}>
                         <TableCell className="font-medium">{header}</TableCell>
                         <TableCell>
                           <Select 
@@ -342,10 +342,10 @@ export default function ImportTransactionsPage() {
                   <h3 className="text-md font-semibold mb-2">Data Preview (First {csvPreview.length} Rows)</h3>
                   <div className="overflow-x-auto border rounded-md p-2 bg-muted/30 max-h-60">
                     <Table className="text-xs">
-                       <TableHeader><TableRow>{csvHeaders.map(h => <TableHead key={h}>{h}</TableHead>)}</TableRow></TableHeader>
+                       <TableHeader><TableRow>{csvHeaders.map((h, index) => <TableHead key={`${h}-${index}`}>{h}</TableHead>)}</TableRow></TableHeader>
                        <TableBody>
                         {csvPreview.map((row, rowIndex) => (
-                          <TableRow key={rowIndex}>{csvHeaders.map(h => <TableCell key={h} className="max-w-[100px] truncate" title={row[h]}>{row[h]}</TableCell>)}</TableRow>
+                          <TableRow key={`preview-row-${rowIndex}`}>{csvHeaders.map((h, cellIndex) => <TableCell key={`${h}-${cellIndex}-row-${rowIndex}`} className="max-w-[100px] truncate" title={row[h]}>{row[h]}</TableCell>)}</TableRow>
                         ))}
                        </TableBody>
                     </Table>
