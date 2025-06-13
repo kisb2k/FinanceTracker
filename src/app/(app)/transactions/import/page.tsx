@@ -89,13 +89,19 @@ export default function ImportTransactionsPage() {
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
         setPageError(null); 
+        setCsvFileContent(''); // Clear previous content immediately
         const reader = new FileReader();
         reader.onload = (e) => {
             setCsvFileContent(e.target?.result as string);
         };
         reader.onerror = () => {
-            console.error("FileReader error:", reader.error);
-            setPageError(`Error reading file: ${reader.error?.message || 'Unknown read error'}. Please try again or use a different file.`);
+            console.error("FileReader error object:", reader.error);
+            const specificMessage = reader.error?.message || 'Unknown read error';
+            let userFriendlyMessage = `Error reading file: "${file.name}". Message: ${specificMessage}. Please try again or use a different file.`;
+            if (specificMessage.toLowerCase().includes("notreadableerror") || specificMessage.includes("permission problems") || specificMessage.includes("could not be read")) {
+                userFriendlyMessage = `Could not read the file: "${file.name}". This might be due to file permission issues, the file being moved/changed after selection, or browser restrictions. Please check the file and try again, or select a different file.`;
+            }
+            setPageError(userFriendlyMessage);
             setSelectedFile(null); 
             setCsvFileContent(''); 
         };
@@ -274,6 +280,8 @@ export default function ImportTransactionsPage() {
             await addCategory({ name: catNameToCreate });
             newCategoriesAddedCount++;
             localProcessingLog.push(`Successfully created new category: "${catNameToCreate}".`);
+            // Optimistically add to local dbCategories to avoid immediate re-fetch if not strictly needed
+            // However, a full re-fetch is safer to get actual IDs and ensure consistency.
             dbCategories.push({id: 'temp-' + catNameToCreate, name: catNameToCreate }); 
             existingDbCategoryNames.add(catNameToCreate.toLowerCase());
             currentDbCategoriesByName[catNameToCreate.toLowerCase()] = catNameToCreate;
@@ -287,6 +295,7 @@ export default function ImportTransactionsPage() {
       }
       if (newCategoriesAddedCount > 0) {
         toast({ title: "Categories Created", description: `${newCategoriesAddedCount} new categories added to database.` });
+        // Re-fetch all categories to get their actual IDs and ensure consistency
         const updatedDbCats = await getCategories();
         setDbCategories(updatedDbCats);
       }
@@ -305,11 +314,12 @@ export default function ImportTransactionsPage() {
     for (const fmt of commonFormats) {
         try {
             const parsed = parseDateFns(dateStr, fmt, new Date());
-            if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
+            if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) { // Basic sanity check for year
                  return formatDateFns(parsed, 'yyyy-MM-dd');
             }
         } catch (e) { /* try next format */ }
     }
+    // Fallback for other potential JS parsable dates
     try { 
         const parsed = new Date(dateStr);
          if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
@@ -361,10 +371,11 @@ export default function ImportTransactionsPage() {
         const transactionAmountStr = rowData[amountCol] || '';
         const originalCsvCategoryStr = categoryCol ? (rowData[categoryCol] || '') : 'Uncategorized';
         
+        // Use the AI-mapped category if available, otherwise the original CSV category, fallback to 'Uncategorized'
         const finalCategoryName = aiCategoryMap[originalCsvCategoryStr] || originalCsvCategoryStr || 'Uncategorized';
         
         const parsedDate = parseDateString(transactionDateStr);
-        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
+        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,"")); // Clean amount string
 
         if (!parsedDate) {
           localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
@@ -384,7 +395,7 @@ export default function ImportTransactionsPage() {
           date: parsedDate,
           description: transactionDescriptionStr,
           amount: parsedAmount,
-          category: finalCategoryName,
+          category: finalCategoryName, // Use the final resolved category name
           fileName: selectedFile.name,
         };
 
@@ -442,6 +453,7 @@ export default function ImportTransactionsPage() {
     setProgressValue(0);
     setIsLoading(false);
     setCurrentTaskMessage('');
+    // Re-fetch accounts and categories in case new ones were added and user wants to start over
     fetchRequiredData();
   };
 
