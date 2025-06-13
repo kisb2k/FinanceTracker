@@ -1,7 +1,7 @@
 
 'use client';
 
-import { useState, ChangeEvent, FormEvent, useEffect } from 'react';
+import { useState, ChangeEvent, FormEvent, useEffect, useCallback } from 'react';
 import Link from 'next/link';
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,19 +10,22 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight } from "lucide-react";
-import type { Account } from '@/lib/types';
+import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight, Brain } from "lucide-react";
+import type { Account, Category as CategoryType } from '@/lib/types';
 import { mapCsvColumns, type MapCsvColumnsOutput, type MappingEntry } from '@/ai/flows/map-csv-columns';
+import { categorizeTransaction, type CategorizeTransactionInput, type CategorizeTransactionOutput } from '@/ai/flows/categorize-transaction';
 import { Progress } from '@/components/ui/progress';
 import { getAccounts, updateAccountLastImported } from '@/services/accountService';
 import { addTransaction, type AddTransactionData } from '@/services/transactionService';
+import { getCategories, addCategory } from '@/services/categoryService';
 import { useToast } from '@/hooks/use-toast';
 import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
+const AI_CONFIDENCE_THRESHOLD = 0.7;
 
-type ImportStep = 'upload' | 'map_columns' | 'review' | 'complete';
+type ImportStep = 'upload' | 'map_columns' | 'categorize_ai' | 'review' | 'complete';
 
 interface CsvRow {
   [key: string]: string;
@@ -33,37 +36,53 @@ export default function ImportTransactionsPage() {
   const [isAccountsLoading, setIsAccountsLoading] = useState(true);
   const [accountsError, setAccountsError] = useState<string | null>(null);
 
+  const [dbCategories, setDbCategories] = useState<CategoryType[]>([]);
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
+  const [currentTaskMessage, setCurrentTaskMessage] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
+  const [categoryProcessingLog, setCategoryProcessingLog] = useState<string[]>([]);
 
   const [importStep, setImportStep] = useState<ImportStep>('upload');
+  const [csvFileContent, setCsvFileContent] = useState<string>('');
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
+  const [csvDataRows, setCsvDataRows] = useState<CsvRow[]>([]);
   const [csvPreview, setCsvPreview] = useState<CsvRow[]>([]);
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
+  const [aiCategoryMap, setAiCategoryMap] = useState<Record<string, string>>({}); // Maps original CSV category to final DB category name
   const [progressValue, setProgressValue] = useState(0);
   const { toast } = useToast();
 
-  useEffect(() => {
-    const fetchAccountsForImport = async () => {
-      setIsAccountsLoading(true);
-      setAccountsError(null);
-      try {
-        const fetchedAccounts = await getAccounts();
-        setAccounts(fetchedAccounts);
-      } catch (e) {
-        const errorMsg = (e as Error).message || "Failed to load accounts for import.";
-        setAccountsError(errorMsg);
-        toast({ title: "Error Loading Accounts", description: errorMsg, variant: "destructive" });
-      } finally {
-        setIsAccountsLoading(false);
-      }
-    };
-    fetchAccountsForImport();
+  const fetchRequiredData = useCallback(async () => {
+    setIsAccountsLoading(true);
+    setAccountsError(null);
+    setCurrentTaskMessage('Loading accounts and categories...');
+    try {
+      const [fetchedAccounts, fetchedCategories] = await Promise.all([
+        getAccounts(),
+        getCategories()
+      ]);
+      setAccounts(fetchedAccounts);
+      setDbCategories(fetchedCategories);
+      setCurrentTaskMessage('');
+    } catch (e) {
+      const errorMsg = (e as Error).message || "Failed to load accounts or categories for import.";
+      setAccountsError(errorMsg); // Use a general error state or a specific one for categories if needed
+      toast({ title: "Error Loading Initial Data", description: errorMsg, variant: "destructive" });
+      setCurrentTaskMessage('');
+    } finally {
+      setIsAccountsLoading(false);
+    }
   }, [toast]);
+
+  useEffect(() => {
+    fetchRequiredData();
+  }, [fetchRequiredData]);
+
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (event.target.files && event.target.files[0]) {
@@ -71,123 +90,241 @@ export default function ImportTransactionsPage() {
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
         setError(null);
+        // Read file content for later full processing
+        const reader = new FileReader();
+        reader.onload = (e) => setCsvFileContent(e.target?.result as string);
+        reader.readAsText(file);
       } else {
         setSelectedFile(null);
+        setCsvFileContent('');
         setError('Invalid file type. Please upload a CSV file.');
       }
     }
   };
 
-  const parseCsvPreview = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const text = e.target?.result as string;
-      const lines = text.split(/\r\n|\n|\r/).slice(0, 6); 
-      if (lines.length > 0) {
-        const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-        setCsvHeaders(headers);
-        const previewData = lines.slice(1).filter(line => line.trim() !== '').map(line => {
-          const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
-          return headers.reduce((obj, header, index) => {
-            obj[header] = values[index] || '';
-            return obj;
-          }, {} as CsvRow);
-        });
-        setCsvPreview(previewData);
-      }
-    };
-    reader.readAsText(file);
+  const parseCsvContent = (content: string, previewOnly: boolean = false) => {
+    const lines = content.split(/\r\n|\n|\r/);
+    if (lines.length === 0) return { headers: [], rows: [] };
+
+    const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
+    const dataLines = previewOnly ? lines.slice(1, 6) : lines.slice(1);
+
+    const rows = dataLines.filter(line => line.trim() !== '').map(line => {
+      const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
+      return headers.reduce((obj, header, index) => {
+        obj[header] = values[index] || '';
+        return obj;
+      }, {} as CsvRow);
+    });
+    return { headers, rows };
   };
 
+
   const handleProceedToMapping = async () => {
-    if (!selectedFile || !selectedAccountId) {
-      setError('Please select a file and an account.');
+    if (!selectedFile || !selectedAccountId || !csvFileContent) {
+      setError('Please select a file, an account, and ensure file content is loaded.');
       return;
     }
     setIsLoading(true);
     setError(null);
+    setCurrentTaskMessage('Parsing CSV and suggesting column mappings...');
     setProgressValue(10);
 
-    parseCsvPreview(selectedFile);
+    const { headers: parsedHeaders, rows: parsedPreviewRows } = parseCsvContent(csvFileContent, true);
+    setCsvHeaders(parsedHeaders);
+    setCsvPreview(parsedPreviewRows);
+    
+    // Also parse full data for later use, don't set to preview state
+    const { rows: fullDataRows } = parseCsvContent(csvFileContent, false);
+    setCsvDataRows(fullDataRows);
+
 
     try {
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const csvDataContent = e.target?.result as string;
-        setProgressValue(30);
-        try {
-            const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: csvDataContent.split(/\r\n|\n|\r/).slice(0, 10).join('\\n') });
-            if (aiResult && Array.isArray(aiResult.columnMappings)) {
-              const newColumnMap = aiResult.columnMappings.reduce((acc, mapping: MappingEntry) => {
-                if (mapping.csvHeader && csvHeaders.includes(mapping.csvHeader)) { // Ensure AI mapped header exists in actual CSV
-                  acc[mapping.csvHeader] = mapping.transactionField || '';
-                }
-                return acc;
-              }, {} as Record<string, string>);
-              // Ensure all actual headers have an entry, even if unmapped by AI
-              csvHeaders.forEach(header => {
-                if (!(header in newColumnMap)) {
-                    newColumnMap[header] = '';
-                }
-              });
-              setColumnMap(newColumnMap);
-              toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
-            } else {
-              throw new Error("AI mapping result was not in the expected format (expected an array of mappings).");
-            }
-        } catch (aiMapError) {
-            console.error("AI Mapping Error:", aiMapError);
-            setError('AI column mapping failed. Please map columns manually or verify CSV format.');
-            toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
-            const fallbackMap = csvHeaders.reduce((acc, header) => ({...acc, [header]: ''}), {});
-            setColumnMap(fallbackMap);
-        }
-        setProgressValue(50);
-        setImportStep('map_columns');
-        setIsLoading(false);
-      };
-      reader.onerror = () => {
-        setError("Failed to read the selected file.");
-        setIsLoading(false);
-        setProgressValue(0);
-      };
-      reader.readAsText(selectedFile);
-    } catch (fileReadError) {
-      console.error("File Reading Error:", fileReadError);
-      setError('Error processing the file. Please try again.');
-      setIsLoading(false);
-      setProgressValue(0);
+      setProgressValue(30);
+      // Use first 10 lines for AI mapping suggestion for performance
+      const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n');
+      const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: aiMapInputCsv });
+      if (aiResult && Array.isArray(aiResult.columnMappings)) {
+        const newColumnMap = aiResult.columnMappings.reduce((acc, mapping: MappingEntry) => {
+          if (mapping.csvHeader && parsedHeaders.includes(mapping.csvHeader)) {
+            acc[mapping.csvHeader] = mapping.transactionField || '';
+          }
+          return acc;
+        }, {} as Record<string, string>);
+        parsedHeaders.forEach(header => {
+          if (!(header in newColumnMap)) {
+            newColumnMap[header] = '';
+          }
+        });
+        setColumnMap(newColumnMap);
+        toast({ title: "AI Mapping Successful", description: "Column suggestions applied." });
+      } else {
+        throw new Error("AI mapping result was not in the expected format.");
+      }
+    } catch (aiMapError) {
+      console.error("AI Column Mapping Error:", aiMapError);
+      setError('AI column mapping failed. Please map columns manually.');
+      toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
+      const fallbackMap = parsedHeaders.reduce((acc, header) => ({ ...acc, [header]: '' }), {});
+      setColumnMap(fallbackMap);
     }
+    setProgressValue(50);
+    setImportStep('map_columns');
+    setIsLoading(false);
+    setCurrentTaskMessage('');
   };
 
   const handleColumnMapChange = (csvHeader: string, transactionField: string) => {
     setColumnMap(prev => ({ ...prev, [csvHeader]: transactionField === UNMAPPED_PLACEHOLDER_VALUE ? "" : transactionField }));
   };
+  
+  const handleProceedToAICategorization = async () => {
+     if (Object.values(columnMap).filter(field => field !== '').length === 0) {
+       setError('Please map at least one CSV column to a transaction field.');
+       toast({ title: "Mapping Incomplete", description: "At least one column must be mapped.", variant: "destructive"});
+       return;
+    }
+    const mappedCategoryHeader = Object.keys(columnMap).find(header => columnMap[header] === 'category');
+    if (!mappedCategoryHeader) {
+        toast({ title: "No Category Column Mapped", description: "Skipping AI categorization. You can map a category column to enable this.", variant: "default" });
+        // If no category column, skip to review/final import step directly
+        // For now, we'll just log and proceed to show the structure, actual import will handle this
+        setImportStep('review'); // Or 'complete' if review step is removed
+        setProgressValue(90);
+        return;
+    }
 
-  // Helper to parse date string from CSV - very basic, extend as needed
+    setIsLoading(true);
+    setCurrentTaskMessage('Analyzing categories with AI...');
+    setProgressValue(60);
+    setCategoryProcessingLog([]);
+
+    const csvCategoryColumnName = Object.keys(columnMap).find(h => columnMap[h] === 'category');
+    if (!csvCategoryColumnName) {
+      setCurrentTaskMessage('Category column not mapped. Skipping AI categorization.');
+      setImportStep('review'); // Or directly to processing transactions
+      setIsLoading(false);
+      setProgressValue(80);
+      return;
+    }
+
+    const uniqueCsvCategories = Array.from(new Set(csvDataRows.map(row => row[csvCategoryColumnName]).filter(cat => cat && cat.trim() !== '')));
+    const existingDbCategoryNames = new Set(dbCategories.map(cat => cat.name.toLowerCase()));
+    const currentDbCategoriesByName = dbCategories.reduce((acc, cat) => {
+      acc[cat.name.toLowerCase()] = cat.name; // Store original casing
+      return acc;
+    }, {} as Record<string, string>);
+
+
+    let tempAiCategoryMap: Record<string, string> = {};
+    let categoriesToCreate: string[] = [];
+    let localProcessingLog: string[] = [`Found ${uniqueCsvCategories.length} unique categories in CSV.`];
+
+    for (const csvCategory of uniqueCsvCategories) {
+      setCurrentTaskMessage(`AI Processing: "${csvCategory}"...`);
+      if (existingDbCategoryNames.has(csvCategory.toLowerCase())) {
+        const dbMatch = currentDbCategoriesByName[csvCategory.toLowerCase()];
+        tempAiCategoryMap[csvCategory] = dbMatch;
+        localProcessingLog.push(`"${csvCategory}" matches existing DB category "${dbMatch}".`);
+      } else {
+        try {
+          const aiResult: CategorizeTransactionOutput = await categorizeTransaction({
+            transactionDescription: csvCategory, // Treat CSV category string as description for matching
+            availableCategories: dbCategories.map(c => c.name)
+          });
+
+          const suggestedDbCategoryMatch = dbCategories.find(dbCat => dbCat.name.toLowerCase() === aiResult.suggestedCategory.toLowerCase());
+
+          if (suggestedDbCategoryMatch && aiResult.confidence >= AI_CONFIDENCE_THRESHOLD) {
+            tempAiCategoryMap[csvCategory] = suggestedDbCategoryMatch.name;
+            localProcessingLog.push(`AI mapped CSV "${csvCategory}" to existing DB category "${suggestedDbCategoryMatch.name}" (Confidence: ${aiResult.confidence.toFixed(2)}).`);
+          } else {
+            // AI suggested something new or low confidence for existing match
+            tempAiCategoryMap[csvCategory] = csvCategory; // Use original CSV category for now
+            if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
+              categoriesToCreate.push(csvCategory);
+              localProcessingLog.push(`AI suggests "${csvCategory}" is a new category (or low confidence match). Marked for creation.`);
+            }
+          }
+        } catch (aiError) {
+          localProcessingLog.push(`Error processing category "${csvCategory}" with AI: ${(aiError as Error).message}. Using original.`);
+          tempAiCategoryMap[csvCategory] = csvCategory; // Fallback to original
+           if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
+              categoriesToCreate.push(csvCategory);
+           }
+        }
+      }
+      setCategoryProcessingLog([...localProcessingLog]); // Update log progressively
+    }
+    
+    setAiCategoryMap(tempAiCategoryMap);
+    setProgressValue(75);
+
+    if (categoriesToCreate.length > 0) {
+      setCurrentTaskMessage(`Creating ${categoriesToCreate.length} new categories...`);
+      localProcessingLog.push(`Attempting to create ${categoriesToCreate.length} new categories: ${categoriesToCreate.join(', ')}`);
+      setCategoryProcessingLog([...localProcessingLog]);
+
+      let newCategoriesAddedCount = 0;
+      for (const catNameToCreate of categoriesToCreate) {
+        try {
+          // Check again to prevent race conditions if multiple CSV cats resolve to same new name
+          const currentExistingLower = new Set([...dbCategories.map(c => c.name.toLowerCase()), ...Object.values(tempAiCategoryMap).map(c => c.toLowerCase())]);
+          if (!currentExistingLower.has(catNameToCreate.toLowerCase())) {
+            await addCategory({ name: catNameToCreate });
+            newCategoriesAddedCount++;
+            localProcessingLog.push(`Successfully created new category: "${catNameToCreate}".`);
+            // Add to our local understanding of DB categories to prevent re-creation attempts
+            dbCategories.push({id: 'temp-' + catNameToCreate, name: catNameToCreate }); // Simplistic update
+            existingDbCategoryNames.add(catNameToCreate.toLowerCase());
+            currentDbCategoriesByName[catNameToCreate.toLowerCase()] = catNameToCreate;
+          } else {
+            localProcessingLog.push(`Category "${catNameToCreate}" already exists or was just mapped. Skipping creation.`);
+          }
+        } catch (createError) {
+          localProcessingLog.push(`Failed to create category "${catNameToCreate}": ${(createError as Error).message}. It might already exist.`);
+        }
+        setCategoryProcessingLog([...localProcessingLog]);
+      }
+      if (newCategoriesAddedCount > 0) {
+        toast({ title: "Categories Created", description: `${newCategoriesAddedCount} new categories added to database.` });
+        // Re-fetch all categories to get actual IDs and ensure consistency
+        const updatedDbCats = await getCategories();
+        setDbCategories(updatedDbCats);
+      }
+    }
+    
+    setCurrentTaskMessage('AI categorization complete.');
+    setImportStep('review');
+    setIsLoading(false);
+    setProgressValue(85);
+  };
+
+
   const parseDateString = (dateStr: string): string | null => {
     if (!dateStr) return null;
-    // Attempt to parse common formats, default to YYYY-MM-DD if direct
-    const commonFormats = ['MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy'];
+    const commonFormats = ['MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy', 'M/d/yy', 'M/dd/yyyy', 'MM/d/yyyy'];
     for (const fmt of commonFormats) {
         try {
             const parsed = parseDateFns(dateStr, fmt, new Date());
-            if (!isNaN(parsed.valueOf())) return formatDateFns(parsed, 'yyyy-MM-dd');
+            if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
+                 return formatDateFns(parsed, 'yyyy-MM-dd');
+            }
         } catch (e) { /* try next format */ }
     }
-    // Fallback for ISO-like strings or directly YYYY-MM-DD
-    try {
+    try { // Attempt direct ISO parsing or common date constructor behavior
         const parsed = new Date(dateStr);
-        if (!isNaN(parsed.valueOf())) return formatDateFns(parsed, 'yyyy-MM-dd');
+         if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
+            return formatDateFns(parsed, 'yyyy-MM-dd');
+        }
     } catch(e) { /* give up */ }
     
     console.warn(`Could not parse date: ${dateStr}`);
     return null; 
   };
 
-
-  const handleSubmitImport = async (event: FormEvent) => {
-    event.preventDefault();
+  const handleSubmitImport = async (event?: FormEvent) => {
+    event?.preventDefault();
     if (!selectedFile || !selectedAccountId || Object.keys(columnMap).length === 0) {
       setError('File, account, and column mappings are required.');
       return;
@@ -207,50 +344,40 @@ export default function ImportTransactionsPage() {
     setError(null);
     setSuccessMessage(null);
     setImportErrors([]);
-    setProgressValue(60);
+    setCurrentTaskMessage('Importing transactions...');
+    setProgressValue(90);
 
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const fileContent = e.target?.result as string;
-      const lines = fileContent.split(/\r\n|\n|\r/).filter(line => line.trim() !== '');
-      if (lines.length < 2) { // Must have header + at least one data row
-        setError("CSV file is empty or has no data rows.");
-        setIsLoading(false);
-        setProgressValue(0);
-        return;
-      }
-
-      const fileHeaders = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-      const dataRows = lines.slice(1);
       let importedCount = 0;
       let localImportErrors: string[] = [];
 
-      for (let i = 0; i < dataRows.length; i++) {
-        const rowString = dataRows[i];
-        const rowValues = rowString.split(',').map(v => v.trim().replace(/"/g, ''));
-        const rowData: Record<string, string> = fileHeaders.reduce((obj, header, index) => {
-          obj[header] = rowValues[index] || '';
-          return obj;
-        }, {} as Record<string, string>);
+      const categoryCol = Object.keys(columnMap).find(h => columnMap[h] === 'category');
+      const dateCol = Object.keys(columnMap).find(h => columnMap[h] === 'date')!;
+      const descriptionCol = Object.keys(columnMap).find(h => columnMap[h] === 'description')!;
+      const amountCol = Object.keys(columnMap).find(h => columnMap[h] === 'amount')!;
 
-        const transactionDateStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'date') || ''];
-        const transactionDescriptionStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'description') || ''];
-        const transactionAmountStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'amount') || ''];
-        const transactionCategoryStr = rowData[Object.keys(columnMap).find(h => columnMap[h] === 'category') || ''] || 'Uncategorized';
+      for (let i = 0; i < csvDataRows.length; i++) {
+        const rowData = csvDataRows[i];
+        
+        const transactionDateStr = rowData[dateCol] || '';
+        const transactionDescriptionStr = rowData[descriptionCol] || '';
+        const transactionAmountStr = rowData[amountCol] || '';
+        const originalCsvCategoryStr = categoryCol ? (rowData[categoryCol] || '') : 'Uncategorized';
+        
+        const finalCategoryName = aiCategoryMap[originalCsvCategoryStr] || originalCsvCategoryStr || 'Uncategorized';
         
         const parsedDate = parseDateString(transactionDateStr);
-        const parsedAmount = parseFloat(transactionAmountStr);
+        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,"")); // Clean amount string
 
         if (!parsedDate) {
-          localImportErrors.push(`Row ${i + 1}: Invalid or unparseable date "${transactionDateStr}". Skipping.`);
+          localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
           continue;
         }
         if (isNaN(parsedAmount)) {
-          localImportErrors.push(`Row ${i + 1}: Invalid amount "${transactionAmountStr}". Skipping.`);
+          localImportErrors.push(`Row ${i + 2}: Invalid amount "${transactionAmountStr}". Skipping.`);
           continue;
         }
         if (!transactionDescriptionStr) {
-          localImportErrors.push(`Row ${i + 1}: Missing description. Skipping.`);
+          localImportErrors.push(`Row ${i + 2}: Missing description. Skipping.`);
           continue;
         }
 
@@ -259,7 +386,7 @@ export default function ImportTransactionsPage() {
           date: parsedDate,
           description: transactionDescriptionStr,
           amount: parsedAmount,
-          category: transactionCategoryStr,
+          category: finalCategoryName,
           fileName: selectedFile.name,
         };
 
@@ -267,9 +394,9 @@ export default function ImportTransactionsPage() {
           await addTransaction(transactionToImport);
           importedCount++;
         } catch (txError) {
-          localImportErrors.push(`Row ${i + 1} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
+          localImportErrors.push(`Row ${i + 2} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
         }
-        setProgressValue(60 + Math.floor(((i + 1) / dataRows.length) * 35)); // 60% to 95% for this part
+        setProgressValue(90 + Math.floor(((i + 1) / csvDataRows.length) * 9));
       }
 
       if (importedCount > 0) {
@@ -281,9 +408,9 @@ export default function ImportTransactionsPage() {
         setSuccessMessage(`${importedCount} transaction(s) imported successfully for account ${accounts.find(a=>a.id === selectedAccountId)?.name}.`);
       } else if (localImportErrors.length > 0 && importedCount === 0) {
          setError(`No transactions were imported. See errors below.`);
-      } else if (localImportErrors.length === 0 && importedCount === 0 && dataRows.length > 0) {
+      } else if (localImportErrors.length === 0 && importedCount === 0 && csvDataRows.length > 0) {
          setError(`No transactions were imported. The file might have been processed, but no valid transactions were found or created.`);
-      } else if (dataRows.length === 0) {
+      } else if (csvDataRows.length === 0) {
          setError(`No data rows found in the CSV file after the header.`);
       }
 
@@ -292,19 +419,12 @@ export default function ImportTransactionsPage() {
       setImportStep('complete');
       setIsLoading(false);
       setProgressValue(100);
+      setCurrentTaskMessage('');
       toast({
         title: importedCount > 0 ? "Import Complete" : "Import Finished with Issues",
         description: importedCount > 0 ? `${importedCount} transactions imported.` : `Import failed or had issues. Check messages.`,
         variant: importedCount > 0 && localImportErrors.length === 0 ? "default" : "destructive"
       });
-
-    };
-    reader.onerror = () => {
-      setError("Failed to read the selected file for final import.");
-      setIsLoading(false);
-      setProgressValue(0);
-    };
-    reader.readAsText(selectedFile);
   };
 
   const resetForm = () => {
@@ -313,12 +433,19 @@ export default function ImportTransactionsPage() {
     setError(null);
     setSuccessMessage(null);
     setImportErrors([]);
+    setCategoryProcessingLog([]);
     setImportStep('upload');
+    setCsvFileContent('');
     setCsvHeaders([]);
+    setCsvDataRows([]);
     setCsvPreview([]);
     setColumnMap({});
+    setAiCategoryMap({});
     setProgressValue(0);
     setIsLoading(false);
+    setCurrentTaskMessage('');
+    // Re-fetch categories in case some were added in a previous incomplete import
+    fetchRequiredData();
   };
 
 
@@ -331,6 +458,12 @@ export default function ImportTransactionsPage() {
         )}
       </div>
 
+      {isLoading && currentTaskMessage && (
+        <div className="flex items-center justify-center p-4 my-2 bg-muted rounded-md">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" /> 
+            <span>{currentTaskMessage}</span>
+        </div>
+      )}
       {importStep !== 'complete' && <Progress value={progressValue} className="w-full mb-4" />}
 
       {error && (
@@ -352,8 +485,8 @@ export default function ImportTransactionsPage() {
             <XCircle className="h-4 w-4"/>
             <AlertTitle>Import Issues ({importErrors.length})</AlertTitle>
             <AlertDescription>
-                <ul className="list-disc list-inside max-h-40 overflow-y-auto">
-                    {importErrors.slice(0,10).map((err, idx) => <li key={idx}>{err}</li>)}
+                <ul className="list-disc list-inside max-h-40 overflow-y-auto text-xs">
+                    {importErrors.slice(0,10).map((err, idx) => <li key={`import-err-${idx}`}>{err}</li>)}
                     {importErrors.length > 10 && <li>And {importErrors.length-10} more errors...</li>}
                 </ul>
             </AlertDescription>
@@ -412,7 +545,7 @@ export default function ImportTransactionsPage() {
           <CardFooter className="justify-end">
             <Button
               onClick={handleProceedToMapping}
-              disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!accountsError}
+              disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!accountsError || !csvFileContent}
             >
               {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
               Proceed to Column Mapping
@@ -423,7 +556,6 @@ export default function ImportTransactionsPage() {
 
       {importStep === 'map_columns' && (
         <Card className="shadow-lg">
-          <form onSubmit={handleSubmitImport}>
             <CardHeader>
               <CardTitle>Step 2: Map CSV Columns</CardTitle>
               <CardDescription>
@@ -484,14 +616,51 @@ export default function ImportTransactionsPage() {
             </CardContent>
             <CardFooter className="justify-between">
                <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); }}>Back</Button>
-               <Button type="submit" disabled={isLoading}>
-                {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-                Confirm and Import
+               <Button onClick={handleProceedToAICategorization} disabled={isLoading}>
+                {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Brain className="mr-2 h-4 w-4" />}
+                Proceed to AI Categorization
               </Button>
             </CardFooter>
-          </form>
         </Card>
       )}
+
+      {importStep === 'review' && (
+        <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle>Step 3: Review and Import</CardTitle>
+              <CardDescription>
+                Review AI category suggestions and finalize the import. 
+                {categoryProcessingLog.length > 0 && " See AI processing log below."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+                <p>Ready to import <strong>{csvDataRows.length}</strong> transaction rows from <strong>{selectedFile?.name}</strong> into account <strong>{accounts.find(a => a.id === selectedAccountId)?.name}</strong>.</p>
+                
+                {categoryProcessingLog.length > 0 && (
+                    <div>
+                        <h4 className="font-semibold text-sm mb-1">AI Category Processing Log:</h4>
+                        <div className="max-h-40 overflow-y-auto text-xs p-2 border rounded-md bg-muted/50 space-y-1">
+                            {categoryProcessingLog.map((log, idx) => <p key={`cat-log-${idx}`}>{log}</p>)}
+                        </div>
+                    </div>
+                )}
+
+                <p className="text-sm text-muted-foreground">
+                    Ensure all mappings and AI suggestions are correct.
+                    Date format will be attempted to be parsed from common formats (e.g., MM/DD/YYYY, YYYY-MM-DD).
+                    Amount column will be cleaned of non-numeric characters (except decimal and minus).
+                </p>
+            </CardContent>
+            <CardFooter className="justify-between">
+                <Button type="button" variant="outline" onClick={() => { setImportStep('map_columns'); setProgressValue(50); }}>Back to Mapping</Button>
+                <Button onClick={handleSubmitImport} disabled={isLoading}>
+                    {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
+                    Confirm and Import Transactions
+                </Button>
+            </CardFooter>
+        </Card>
+      )}
+
 
       {importStep === 'complete' && (
          <Card className="shadow-lg">
@@ -511,3 +680,4 @@ export default function ImportTransactionsPage() {
     </div>
   );
 }
+
