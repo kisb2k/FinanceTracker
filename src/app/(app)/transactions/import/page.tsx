@@ -16,7 +16,7 @@ import { mapCsvColumns, type MapCsvColumnsOutput, type MappingEntry } from '@/ai
 import { categorizeTransaction, type CategorizeTransactionInput, type CategorizeTransactionOutput } from '@/ai/flows/categorize-transaction';
 import { Progress } from '@/components/ui/progress';
 import { getAccounts, updateAccountLastImported } from '@/services/accountService';
-import { addTransaction, type AddTransactionData } from '@/services/transactionService';
+import { addTransaction, type AddTransactionData, updateMultipleTransactions } from '@/services/transactionService';
 import { getCategories, addCategory } from '@/services/categoryService';
 import { useToast } from '@/hooks/use-toast';
 import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
@@ -25,10 +25,15 @@ const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
 const AI_CONFIDENCE_THRESHOLD = 0.7;
 
-type ImportStep = 'upload' | 'map_columns' | 'categorize_ai' | 'review' | 'complete';
+type ImportStep = 'upload' | 'map_columns' | 'processing' | 'complete';
 
 interface CsvRow {
   [key: string]: string;
+}
+
+interface ImportedTransactionDetail {
+  id: string;
+  originalCategory: string;
 }
 
 export default function ImportTransactionsPage() {
@@ -52,8 +57,9 @@ export default function ImportTransactionsPage() {
   const [csvDataRows, setCsvDataRows] = useState<CsvRow[]>([]);
   const [csvPreview, setCsvPreview] = useState<CsvRow[]>([]);
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
-  const [aiCategoryMap, setAiCategoryMap] = useState<Record<string, string>>({});
   const [progressValue, setProgressValue] = useState(0);
+  const [importedTransactionDetails, setImportedTransactionDetails] = useState<ImportedTransactionDetail[]>([]);
+
   const { toast } = useToast();
 
   const fetchRequiredData = useCallback(async () => {
@@ -89,7 +95,7 @@ export default function ImportTransactionsPage() {
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
         setPageError(null); 
-        setCsvFileContent(''); // Clear previous content immediately
+        setCsvFileContent(''); 
         const reader = new FileReader();
         reader.onload = (e) => {
             setCsvFileContent(e.target?.result as string);
@@ -98,7 +104,7 @@ export default function ImportTransactionsPage() {
             console.error("FileReader error object:", reader.error);
             const specificMessage = reader.error?.message || 'Unknown read error';
             let userFriendlyMessage = `Error reading file: "${file.name}". Message: ${specificMessage}. Please try again or use a different file.`;
-            if (specificMessage.toLowerCase().includes("notreadableerror") || specificMessage.includes("permission problems") || specificMessage.includes("could not be read")) {
+            if (reader.error?.name === "NotReadableError" || specificMessage.toLowerCase().includes("notreadableerror") || specificMessage.includes("permission problems") || specificMessage.includes("could not be read")) {
                 userFriendlyMessage = `Could not read the file: "${file.name}". This might be due to file permission issues, the file being moved/changed after selection, or browser restrictions. Please check the file and try again, or select a different file.`;
             }
             setPageError(userFriendlyMessage);
@@ -149,7 +155,6 @@ export default function ImportTransactionsPage() {
     const { rows: fullDataRows } = parseCsvContent(csvFileContent, false);
     setCsvDataRows(fullDataRows);
 
-
     try {
       setProgressValue(30);
       const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n');
@@ -188,138 +193,17 @@ export default function ImportTransactionsPage() {
     setColumnMap(prev => ({ ...prev, [csvHeader]: transactionField === UNMAPPED_PLACEHOLDER_VALUE ? "" : transactionField }));
   };
   
-  const handleProceedToAICategorization = async () => {
-     if (Object.values(columnMap).filter(field => field !== '').length === 0) {
-       setPageError('Please map at least one CSV column to a transaction field.');
-       toast({ title: "Mapping Incomplete", description: "At least one column must be mapped.", variant: "destructive"});
-       return;
-    }
-    const mappedCategoryHeader = Object.keys(columnMap).find(header => columnMap[header] === 'category');
-    if (!mappedCategoryHeader) {
-        toast({ title: "No Category Column Mapped", description: "Skipping AI categorization. You can map a category column to enable this.", variant: "default" });
-        setImportStep('review');
-        setProgressValue(90);
-        return;
-    }
-
-    setIsLoading(true);
-    setCurrentTaskMessage('Analyzing categories with AI...');
-    setProgressValue(60);
-    setCategoryProcessingLog([]);
-
-    const csvCategoryColumnName = Object.keys(columnMap).find(h => columnMap[h] === 'category');
-    if (!csvCategoryColumnName) {
-      setCurrentTaskMessage('Category column not mapped. Skipping AI categorization.');
-      setImportStep('review'); 
-      setIsLoading(false);
-      setProgressValue(80);
-      return;
-    }
-
-    const uniqueCsvCategories = Array.from(new Set(csvDataRows.map(row => row[csvCategoryColumnName]).filter(cat => cat && cat.trim() !== '')));
-    const existingDbCategoryNames = new Set(dbCategories.map(cat => cat.name.toLowerCase()));
-    const currentDbCategoriesByName = dbCategories.reduce((acc, cat) => {
-      acc[cat.name.toLowerCase()] = cat.name; 
-      return acc;
-    }, {} as Record<string, string>);
-
-
-    let tempAiCategoryMap: Record<string, string> = {};
-    let categoriesToCreate: string[] = [];
-    let localProcessingLog: string[] = [`Found ${uniqueCsvCategories.length} unique categories in CSV.`];
-
-    for (const csvCategory of uniqueCsvCategories) {
-      setCurrentTaskMessage(`AI Processing: "${csvCategory}"...`);
-      if (existingDbCategoryNames.has(csvCategory.toLowerCase())) {
-        const dbMatch = currentDbCategoriesByName[csvCategory.toLowerCase()];
-        tempAiCategoryMap[csvCategory] = dbMatch;
-        localProcessingLog.push(`"${csvCategory}" matches existing DB category "${dbMatch}".`);
-      } else {
-        try {
-          const aiResult: CategorizeTransactionOutput = await categorizeTransaction({
-            transactionDescription: csvCategory, 
-            availableCategories: dbCategories.map(c => c.name)
-          });
-
-          const suggestedDbCategoryMatch = dbCategories.find(dbCat => dbCat.name.toLowerCase() === aiResult.suggestedCategory.toLowerCase());
-
-          if (suggestedDbCategoryMatch && aiResult.confidence >= AI_CONFIDENCE_THRESHOLD) {
-            tempAiCategoryMap[csvCategory] = suggestedDbCategoryMatch.name;
-            localProcessingLog.push(`AI mapped CSV "${csvCategory}" to existing DB category "${suggestedDbCategoryMatch.name}" (Confidence: ${aiResult.confidence.toFixed(2)}).`);
-          } else {
-            tempAiCategoryMap[csvCategory] = csvCategory; 
-            if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
-              categoriesToCreate.push(csvCategory);
-              localProcessingLog.push(`AI suggests "${csvCategory}" is a new category (or low confidence match). Marked for creation.`);
-            }
-          }
-        } catch (aiError) {
-          localProcessingLog.push(`Error processing category "${csvCategory}" with AI: ${(aiError as Error).message}. Using original.`);
-          tempAiCategoryMap[csvCategory] = csvCategory; 
-           if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
-              categoriesToCreate.push(csvCategory);
-           }
-        }
-      }
-      setCategoryProcessingLog([...localProcessingLog]); 
-    }
-    
-    setAiCategoryMap(tempAiCategoryMap);
-    setProgressValue(75);
-
-    if (categoriesToCreate.length > 0) {
-      setCurrentTaskMessage(`Creating ${categoriesToCreate.length} new categories...`);
-      localProcessingLog.push(`Attempting to create ${categoriesToCreate.length} new categories: ${categoriesToCreate.join(', ')}`);
-      setCategoryProcessingLog([...localProcessingLog]);
-
-      let newCategoriesAddedCount = 0;
-      for (const catNameToCreate of categoriesToCreate) {
-        try {
-          const currentExistingLower = new Set([...dbCategories.map(c => c.name.toLowerCase()), ...Object.values(tempAiCategoryMap).map(c => c.toLowerCase())]);
-          if (!currentExistingLower.has(catNameToCreate.toLowerCase())) {
-            await addCategory({ name: catNameToCreate });
-            newCategoriesAddedCount++;
-            localProcessingLog.push(`Successfully created new category: "${catNameToCreate}".`);
-            // Optimistically add to local dbCategories to avoid immediate re-fetch if not strictly needed
-            // However, a full re-fetch is safer to get actual IDs and ensure consistency.
-            dbCategories.push({id: 'temp-' + catNameToCreate, name: catNameToCreate }); 
-            existingDbCategoryNames.add(catNameToCreate.toLowerCase());
-            currentDbCategoriesByName[catNameToCreate.toLowerCase()] = catNameToCreate;
-          } else {
-            localProcessingLog.push(`Category "${catNameToCreate}" already exists or was just mapped. Skipping creation.`);
-          }
-        } catch (createError) {
-          localProcessingLog.push(`Failed to create category "${catNameToCreate}": ${(createError as Error).message}. It might already exist.`);
-        }
-        setCategoryProcessingLog([...localProcessingLog]);
-      }
-      if (newCategoriesAddedCount > 0) {
-        toast({ title: "Categories Created", description: `${newCategoriesAddedCount} new categories added to database.` });
-        // Re-fetch all categories to get their actual IDs and ensure consistency
-        const updatedDbCats = await getCategories();
-        setDbCategories(updatedDbCats);
-      }
-    }
-    
-    setCurrentTaskMessage('AI categorization complete.');
-    setImportStep('review');
-    setIsLoading(false);
-    setProgressValue(85);
-  };
-
-
   const parseDateString = (dateStr: string): string | null => {
     if (!dateStr) return null;
-    const commonFormats = ['MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy', 'M/d/yy', 'M/dd/yyyy', 'MM/d/yyyy'];
+    const commonFormats = ['MM/dd/yyyy', 'dd/MM/yyyy', 'yyyy-MM-dd', 'MM-dd-yyyy', 'dd-MM-yyyy', 'M/d/yy', 'M/dd/yyyy', 'MM/d/yyyy', 'yyyy/MM/dd', 'MM/dd/yy'];
     for (const fmt of commonFormats) {
         try {
             const parsed = parseDateFns(dateStr, fmt, new Date());
-            if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) { // Basic sanity check for year
+            if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) { 
                  return formatDateFns(parsed, 'yyyy-MM-dd');
             }
         } catch (e) { /* try next format */ }
     }
-    // Fallback for other potential JS parsable dates
     try { 
         const parsed = new Date(dateStr);
          if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
@@ -330,6 +214,136 @@ export default function ImportTransactionsPage() {
     console.warn(`Could not parse date: ${dateStr}`);
     return null; 
   };
+
+  const runAICategorizationAndUpdate = async (
+    localImportedDetails: ImportedTransactionDetail[],
+    currentDbCategories: CategoryType[]
+  ): Promise<{ updatedCategoryCount: number; newCategoriesAddedCount: number; localProcessingLog: string[] }> => {
+    
+    let updatedCategoryCount = 0;
+    let newCategoriesAddedCount = 0;
+    const localProcessingLog: string[] = [];
+    let categoriesToCreateNames: string[] = [];
+    const categoryUpdateMap: Map<string, string> = new Map(); // originalCsvCategory -> finalDbCategoryName
+
+    setCurrentTaskMessage('Starting AI-driven category analysis...');
+    setProgressValue(60);
+    localProcessingLog.push("Starting AI category processing for imported transactions.");
+
+    const uniqueOriginalCategories = Array.from(new Set(localImportedDetails.map(d => d.originalCategory).filter(cat => cat && cat.trim() !== '' && cat !== 'Uncategorized')));
+    localProcessingLog.push(`Found ${uniqueOriginalCategories.length} unique original categories from import to process with AI.`);
+    
+    let tempDbCategories = [...currentDbCategories];
+
+    for (let i = 0; i < uniqueOriginalCategories.length; i++) {
+      const originalCsvCat = uniqueOriginalCategories[i];
+      setCurrentTaskMessage(`AI Processing: "${originalCsvCat}" (${i+1}/${uniqueOriginalCategories.length})`);
+      setProgressValue(60 + Math.floor(((i + 1) / uniqueOriginalCategories.length) * 20));
+
+      const existingDbMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
+
+      if (existingDbMatch) {
+        localProcessingLog.push(`Original category "${originalCsvCat}" matches existing DB category "${existingDbMatch.name}". No AI needed.`);
+        if (originalCsvCat !== existingDbMatch.name) { // Case difference
+             categoryUpdateMap.set(originalCsvCat, existingDbMatch.name);
+        }
+        continue;
+      }
+
+      try {
+        const aiResult = await categorizeTransaction({
+          transactionDescription: originalCsvCat,
+          availableCategories: tempDbCategories.map(c => c.name)
+        });
+        localProcessingLog.push(`AI for "${originalCsvCat}": Suggested "${aiResult.suggestedCategory}", Confidence: ${aiResult.confidence.toFixed(2)}`);
+
+        const aiSuggestedDbCategoryMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === aiResult.suggestedCategory.toLowerCase());
+
+        if (aiSuggestedDbCategoryMatch && aiResult.confidence >= AI_CONFIDENCE_THRESHOLD) {
+          localProcessingLog.push(`AI mapped CSV "${originalCsvCat}" to existing DB category "${aiSuggestedDbCategoryMatch.name}".`);
+          categoryUpdateMap.set(originalCsvCat, aiSuggestedDbCategoryMatch.name);
+        } else {
+          const categoryNameToConsider = aiResult.suggestedCategory || originalCsvCat;
+          localProcessingLog.push(`AI suggests "${categoryNameToConsider}" for "${originalCsvCat}". Marked for potential creation/check.`);
+           if (!tempDbCategories.some(c => c.name.toLowerCase() === categoryNameToConsider.toLowerCase()) && !categoriesToCreateNames.some(n => n.toLowerCase() === categoryNameToConsider.toLowerCase())) {
+               categoriesToCreateNames.push(categoryNameToConsider);
+           }
+           categoryUpdateMap.set(originalCsvCat, categoryNameToConsider); // Tentatively map to this, will be finalized after creation
+        }
+      } catch (aiError) {
+        localProcessingLog.push(`Error processing category "${originalCsvCat}" with AI: ${(aiError as Error).message}. Using original name.`);
+        categoryUpdateMap.set(originalCsvCat, originalCsvCat); // Fallback to original
+      }
+    }
+    setCategoryProcessingLog(prev => [...prev, ...localProcessingLog]);
+
+
+    if (categoriesToCreateNames.length > 0) {
+      setCurrentTaskMessage(`Creating ${categoriesToCreateNames.length} new categories...`);
+      setProgressValue(80);
+      const tempLog: string[] = [`Attempting to create ${categoriesToCreateNames.length} new categories: ${categoriesToCreateNames.join(', ')}`];
+      
+      for (const catNameToCreate of categoriesToCreateNames) {
+        try {
+          if (!tempDbCategories.some(c => c.name.toLowerCase() === catNameToCreate.toLowerCase())) {
+            const newCat = await addCategory({ name: catNameToCreate });
+            tempDbCategories.push(newCat);
+            newCategoriesAddedCount++;
+            tempLog.push(`Successfully created new category: "${newCat.name}".`);
+             // Update categoryUpdateMap for original CSV categories that were supposed to map to this new one
+             for (const [originalCsv, mappedTo] of categoryUpdateMap.entries()) {
+                if (mappedTo.toLowerCase() === newCat.name.toLowerCase()) {
+                    categoryUpdateMap.set(originalCsv, newCat.name);
+                }
+             }
+          } else {
+             tempLog.push(`Category "${catNameToCreate}" already exists or was resolved. Ensuring mapping.`);
+             const existingCatForUpdate = tempDbCategories.find(c => c.name.toLowerCase() === catNameToCreate.toLowerCase());
+             if (existingCatForUpdate) {
+                for (const [originalCsv, mappedTo] of categoryUpdateMap.entries()) {
+                    if (mappedTo.toLowerCase() === existingCatForUpdate.name.toLowerCase()) {
+                        categoryUpdateMap.set(originalCsv, existingCatForUpdate.name);
+                    }
+                }
+             }
+          }
+        } catch (createError) {
+          tempLog.push(`Failed to create category "${catNameToCreate}": ${(createError as Error).message}. It might already exist.`);
+        }
+      }
+      setCategoryProcessingLog(prev => [...prev, ...tempLog]);
+      if (newCategoriesAddedCount > 0) {
+        toast({ title: "Categories Created", description: `${newCategoriesAddedCount} new categories added.` });
+        setDbCategories([...tempDbCategories]); // Update main dbCategories state
+      }
+    }
+    
+    setCurrentTaskMessage('Updating transaction categories based on AI analysis...');
+    setProgressValue(90);
+    const updateLog: string[] = [];
+
+    for (const [originalCsvCat, finalDbCatName] of categoryUpdateMap.entries()) {
+      if (originalCsvCat.toLowerCase() !== finalDbCatName.toLowerCase()) { // Only update if different
+        const transactionsToUpdateIds = localImportedDetails
+          .filter(detail => detail.originalCategory.toLowerCase() === originalCsvCat.toLowerCase())
+          .map(detail => detail.id);
+
+        if (transactionsToUpdateIds.length > 0) {
+          try {
+            await updateMultipleTransactions(transactionsToUpdateIds, { category: finalDbCatName });
+            updatedCategoryCount += transactionsToUpdateIds.length;
+            updateLog.push(`Updated ${transactionsToUpdateIds.length} transactions from "${originalCsvCat}" to "${finalDbCatName}".`);
+          } catch (updateError) {
+            updateLog.push(`Error updating transactions for category "${originalCsvCat}": ${(updateError as Error).message}`);
+          }
+        }
+      }
+    }
+    setCategoryProcessingLog(prev => [...prev, ...updateLog]);
+    
+    return { updatedCategoryCount, newCategoriesAddedCount, localProcessingLog: [...localProcessingLog, ...updateLog] };
+  };
+
 
   const handleSubmitImport = async (event?: FormEvent) => {
     event?.preventDefault();
@@ -352,88 +366,109 @@ export default function ImportTransactionsPage() {
     setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
-    setCurrentTaskMessage('Importing transactions...');
-    setProgressValue(90);
+    setCategoryProcessingLog([]);
+    setImportedTransactionDetails([]);
+    setImportStep('processing');
+    setCurrentTaskMessage('Phase 1: Importing transactions with original categories...');
+    setProgressValue(10);
 
-      let importedCount = 0;
-      let localImportErrors: string[] = [];
+    let importedCount = 0;
+    let localImportErrors: string[] = [];
+    const localImportedDetails: ImportedTransactionDetail[] = [];
 
-      const categoryCol = Object.keys(columnMap).find(h => columnMap[h] === 'category');
-      const dateCol = Object.keys(columnMap).find(h => columnMap[h] === 'date')!;
-      const descriptionCol = Object.keys(columnMap).find(h => columnMap[h] === 'description')!;
-      const amountCol = Object.keys(columnMap).find(h => columnMap[h] === 'amount')!;
+    const categoryCol = Object.keys(columnMap).find(h => columnMap[h] === 'category');
+    const dateCol = Object.keys(columnMap).find(h => columnMap[h] === 'date')!;
+    const descriptionCol = Object.keys(columnMap).find(h => columnMap[h] === 'description')!;
+    const amountCol = Object.keys(columnMap).find(h => columnMap[h] === 'amount')!;
 
-      for (let i = 0; i < csvDataRows.length; i++) {
-        const rowData = csvDataRows[i];
-        
-        const transactionDateStr = rowData[dateCol] || '';
-        const transactionDescriptionStr = rowData[descriptionCol] || '';
-        const transactionAmountStr = rowData[amountCol] || '';
-        const originalCsvCategoryStr = categoryCol ? (rowData[categoryCol] || '') : 'Uncategorized';
-        
-        // Use the AI-mapped category if available, otherwise the original CSV category, fallback to 'Uncategorized'
-        const finalCategoryName = aiCategoryMap[originalCsvCategoryStr] || originalCsvCategoryStr || 'Uncategorized';
-        
-        const parsedDate = parseDateString(transactionDateStr);
-        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,"")); // Clean amount string
+    for (let i = 0; i < csvDataRows.length; i++) {
+      const rowData = csvDataRows[i];
+      setProgressValue(10 + Math.floor(((i + 1) / csvDataRows.length) * 40)); // 10% to 50% for initial import
+      
+      const transactionDateStr = rowData[dateCol] || '';
+      const transactionDescriptionStr = rowData[descriptionCol] || '';
+      const transactionAmountStr = rowData[amountCol] || '';
+      const originalCsvCategoryStr = categoryCol ? (rowData[categoryCol] || '').trim() : 'Uncategorized';
+      
+      const parsedDate = parseDateString(transactionDateStr);
+      const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
 
-        if (!parsedDate) {
-          localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
-          continue;
-        }
-        if (isNaN(parsedAmount)) {
-          localImportErrors.push(`Row ${i + 2}: Invalid amount "${transactionAmountStr}". Skipping.`);
-          continue;
-        }
-        if (!transactionDescriptionStr) {
-          localImportErrors.push(`Row ${i + 2}: Missing description. Skipping.`);
-          continue;
-        }
-
-        const transactionToImport: AddTransactionData = {
-          accountId: selectedAccountId,
-          date: parsedDate,
-          description: transactionDescriptionStr,
-          amount: parsedAmount,
-          category: finalCategoryName, // Use the final resolved category name
-          fileName: selectedFile.name,
-        };
-
-        try {
-          await addTransaction(transactionToImport);
-          importedCount++;
-        } catch (txError) {
-          localImportErrors.push(`Row ${i + 2} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
-        }
-        setProgressValue(90 + Math.floor(((i + 1) / csvDataRows.length) * 9));
+      if (!parsedDate) {
+        localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
+        continue;
       }
-
-      if (importedCount > 0) {
-        try {
-            await updateAccountLastImported(selectedAccountId);
-        } catch (accUpdateError) {
-            localImportErrors.push(`Failed to update account's last import date: ${(accUpdateError as Error).message}`);
-        }
-        setSuccessMessage(`${importedCount} transaction(s) imported successfully for account ${accounts.find(a=>a.id === selectedAccountId)?.name}.`);
-      } else if (localImportErrors.length > 0 && importedCount === 0) {
-         setPageError(`No transactions were imported. See issues below.`);
-      } else if (localImportErrors.length === 0 && importedCount === 0 && csvDataRows.length > 0) {
-         setPageError(`No transactions were imported. The file might have been processed, but no valid transactions were found or created.`);
-      } else if (csvDataRows.length === 0) {
-         setPageError(`No data rows found in the CSV file after the header.`);
+      if (isNaN(parsedAmount)) {
+        localImportErrors.push(`Row ${i + 2}: Invalid amount "${transactionAmountStr}". Skipping.`);
+        continue;
       }
+      if (!transactionDescriptionStr) {
+        localImportErrors.push(`Row ${i + 2}: Missing description. Skipping.`);
+        continue;
+      }
+      
+      // For initial import, try to match original category to existing DB category for consistent casing, otherwise use raw.
+      const existingDbCatMatch = dbCategories.find(c => c.name.toLowerCase() === originalCsvCategoryStr.toLowerCase());
+      const categoryForInitialImport = existingDbCatMatch ? existingDbCatMatch.name : originalCsvCategoryStr || 'Uncategorized';
 
+      const transactionToImport: AddTransactionData = {
+        accountId: selectedAccountId,
+        date: parsedDate,
+        description: transactionDescriptionStr,
+        amount: parsedAmount,
+        category: categoryForInitialImport, 
+        fileName: selectedFile.name,
+      };
 
-      setImportErrors(localImportErrors);
-      setImportStep('complete');
-      setIsLoading(false);
-      setProgressValue(100);
-      setCurrentTaskMessage('');
-      toast({
-        title: importedCount > 0 ? "Import Complete" : "Import Finished with Issues",
-        description: importedCount > 0 ? `${importedCount} transactions imported.` : `Import failed or had issues. Check messages.`,
-        variant: importedCount > 0 && localImportErrors.length === 0 ? "default" : "destructive"
-      });
+      try {
+        const newTx = await addTransaction(transactionToImport);
+        localImportedDetails.push({ id: newTx.id, originalCategory: originalCsvCategoryStr || 'Uncategorized' });
+        importedCount++;
+      } catch (txError) {
+        localImportErrors.push(`Row ${i + 2} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
+      }
+    }
+    setImportedTransactionDetails(localImportedDetails);
+    setImportErrors(prev => [...prev, ...localImportErrors]);
+
+    if (importedCount > 0) {
+      try {
+          await updateAccountLastImported(selectedAccountId);
+      } catch (accUpdateError) {
+          setImportErrors(prev => [...prev, `Failed to update account's last import date: ${(accUpdateError as Error).message}`]);
+      }
+      setCategoryProcessingLog(prev => [...prev, `Successfully imported ${importedCount} transactions with their original categories.`]);
+    } else if (localImportErrors.length > 0 && importedCount === 0) {
+       setPageError(`No transactions were imported. See issues below.`);
+    } else if (csvDataRows.length === 0) {
+       setPageError(`No data rows found in the CSV file after the header.`);
+    }
+    setProgressValue(50);
+
+    // --- Phase 2: AI Categorization and Update ---
+    if (importedCount > 0) {
+        setCurrentTaskMessage('Phase 2: AI processing and updating categories...');
+        const { updatedCategoryCount, newCategoriesAddedCount, localProcessingLog: aiLog } = await runAICategorizationAndUpdate(localImportedDetails, dbCategories);
+        setCategoryProcessingLog(prev => [...prev, ...aiLog]);
+        setSuccessMessage(
+          `Import complete. ${importedCount} transactions initially imported. ${updatedCategoryCount} transactions had their categories updated by AI. ${newCategoriesAddedCount} new categories created.`
+        );
+        if (newCategoriesAddedCount > 0) { // Refresh dbCategories if new ones were added
+            const freshCategories = await getCategories();
+            setDbCategories(freshCategories);
+        }
+    } else {
+        setSuccessMessage(`Initial import finished. ${importedCount} transactions imported. No AI categorization performed as no transactions were successfully imported initially.`);
+    }
+
+    setIsLoading(false);
+    setImportStep('complete');
+    setProgressValue(100);
+    setCurrentTaskMessage('');
+    toast({
+      title: importedCount > 0 ? "Import & Categorization Complete" : "Import Finished with Issues",
+      description: successMessage || `${importedCount} transactions processed. Check logs for details.`,
+      variant: importedCount > 0 && importErrors.length === 0 ? "default" : "destructive"
+    });
   };
 
   const resetForm = () => {
@@ -449,11 +484,10 @@ export default function ImportTransactionsPage() {
     setCsvDataRows([]);
     setCsvPreview([]);
     setColumnMap({});
-    setAiCategoryMap({});
     setProgressValue(0);
     setIsLoading(false);
     setCurrentTaskMessage('');
-    // Re-fetch accounts and categories in case new ones were added and user wants to start over
+    setImportedTransactionDetails([]);
     fetchRequiredData();
   };
 
@@ -500,6 +534,16 @@ export default function ImportTransactionsPage() {
                 </ul>
             </AlertDescription>
         </Alert>
+      )}
+      {categoryProcessingLog.length > 0 && importStep === 'complete' && (
+         <Card className="mt-4">
+            <CardHeader><CardTitle className="text-base">AI Categorization Log</CardTitle></CardHeader>
+            <CardContent>
+                <div className="max-h-60 overflow-y-auto text-xs p-2 border rounded-md bg-muted/50 space-y-1">
+                    {categoryProcessingLog.map((log, idx) => <p key={`cat-log-final-${idx}`}>{log}</p>)}
+                </div>
+            </CardContent>
+         </Card>
       )}
 
 
@@ -624,49 +668,35 @@ export default function ImportTransactionsPage() {
               )}
             </CardContent>
             <CardFooter className="justify-between">
-               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setPageError(null); }}>Back</Button>
-               <Button onClick={handleProceedToAICategorization} disabled={isLoading}>
+               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setPageError(null); }}>Back to Upload</Button>
+               <Button onClick={handleSubmitImport} disabled={isLoading}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Brain className="mr-2 h-4 w-4" />}
-                Proceed to AI Categorization
+                Confirm Mappings and Import
               </Button>
             </CardFooter>
         </Card>
       )}
-
-      {importStep === 'review' && (
+      
+      {importStep === 'processing' && (
         <Card className="shadow-lg">
             <CardHeader>
-              <CardTitle>Step 3: Review and Import</CardTitle>
+              <CardTitle>Processing Import...</CardTitle>
               <CardDescription>
-                Review AI category suggestions and finalize the import. 
-                {categoryProcessingLog.length > 0 && " See AI processing log below."}
+                Your file is being imported and categories are being analyzed. Please wait.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-                <p>Ready to import <strong>{csvDataRows.length}</strong> transaction rows from <strong>{selectedFile?.name}</strong> into account <strong>{accounts.find(a => a.id === selectedAccountId)?.name}</strong>.</p>
-                
-                {categoryProcessingLog.length > 0 && (
+                 <Progress value={progressValue} className="w-full mb-4" />
+                 {currentTaskMessage && <p className="text-sm text-muted-foreground text-center animate-pulse">{currentTaskMessage}</p>}
+                 {categoryProcessingLog.length > 0 && (
                     <div>
-                        <h4 className="font-semibold text-sm mb-1">AI Category Processing Log:</h4>
-                        <div className="max-h-40 overflow-y-auto text-xs p-2 border rounded-md bg-muted/50 space-y-1">
-                            {categoryProcessingLog.map((log, idx) => <p key={`cat-log-${idx}`}>{log}</p>)}
+                        <h4 className="font-semibold text-sm mb-1">Processing Log:</h4>
+                        <div className="max-h-60 overflow-y-auto text-xs p-2 border rounded-md bg-muted/50 space-y-1">
+                            {categoryProcessingLog.map((log, idx) => <p key={`cat-log-proc-${idx}`}>{log}</p>)}
                         </div>
                     </div>
-                )}
-
-                <p className="text-sm text-muted-foreground">
-                    Ensure all mappings and AI suggestions are correct.
-                    Date format will be attempted to be parsed from common formats (e.g., MM/DD/YYYY, YYYY-MM-DD).
-                    Amount column will be cleaned of non-numeric characters (except decimal and minus).
-                </p>
+                 )}
             </CardContent>
-            <CardFooter className="justify-between">
-                <Button type="button" variant="outline" onClick={() => { setImportStep('map_columns'); setProgressValue(50); }}>Back to Mapping</Button>
-                <Button onClick={handleSubmitImport} disabled={isLoading}>
-                    {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UploadCloud className="mr-2 h-4 w-4" />}
-                    Confirm and Import Transactions
-                </Button>
-            </CardFooter>
         </Card>
       )}
 
@@ -677,7 +707,7 @@ export default function ImportTransactionsPage() {
                 <CardTitle>Import Process Finished</CardTitle>
             </CardHeader>
             <CardContent>
-                <p className="mb-4">The import process is complete. Review any messages above for details.</p>
+                <p className="mb-4">The import process is complete. Review any messages and logs for details.</p>
             </CardContent>
             <CardFooter className="flex flex-col sm:flex-row justify-between gap-2">
                 <Button variant="outline" onClick={resetForm}>Import Another File</Button>
@@ -690,3 +720,5 @@ export default function ImportTransactionsPage() {
   );
 }
 
+
+    
