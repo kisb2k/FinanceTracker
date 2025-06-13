@@ -34,7 +34,7 @@ interface CsvRow {
 export default function ImportTransactionsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [isAccountsLoading, setIsAccountsLoading] = useState(true);
-  const [accountsError, setAccountsError] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<string | null>(null); // Consolidated error state
 
   const [dbCategories, setDbCategories] = useState<CategoryType[]>([]);
 
@@ -42,7 +42,6 @@ export default function ImportTransactionsPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(false);
   const [currentTaskMessage, setCurrentTaskMessage] = useState<string>('');
-  const [error, setError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [importErrors, setImportErrors] = useState<string[]>([]);
   const [categoryProcessingLog, setCategoryProcessingLog] = useState<string[]>([]);
@@ -53,13 +52,13 @@ export default function ImportTransactionsPage() {
   const [csvDataRows, setCsvDataRows] = useState<CsvRow[]>([]);
   const [csvPreview, setCsvPreview] = useState<CsvRow[]>([]);
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
-  const [aiCategoryMap, setAiCategoryMap] = useState<Record<string, string>>({}); // Maps original CSV category to final DB category name
+  const [aiCategoryMap, setAiCategoryMap] = useState<Record<string, string>>({});
   const [progressValue, setProgressValue] = useState(0);
   const { toast } = useToast();
 
   const fetchRequiredData = useCallback(async () => {
     setIsAccountsLoading(true);
-    setAccountsError(null);
+    setPageError(null);
     setCurrentTaskMessage('Loading accounts and categories...');
     try {
       const [fetchedAccounts, fetchedCategories] = await Promise.all([
@@ -71,7 +70,7 @@ export default function ImportTransactionsPage() {
       setCurrentTaskMessage('');
     } catch (e) {
       const errorMsg = (e as Error).message || "Failed to load accounts or categories for import.";
-      setAccountsError(errorMsg); // Use a general error state or a specific one for categories if needed
+      setPageError(errorMsg);
       toast({ title: "Error Loading Initial Data", description: errorMsg, variant: "destructive" });
       setCurrentTaskMessage('');
     } finally {
@@ -89,15 +88,22 @@ export default function ImportTransactionsPage() {
       const file = event.target.files[0];
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
-        setError(null);
-        // Read file content for later full processing
+        setPageError(null); // Clear previous errors
         const reader = new FileReader();
-        reader.onload = (e) => setCsvFileContent(e.target?.result as string);
+        reader.onload = (e) => {
+            setCsvFileContent(e.target?.result as string);
+        };
+        reader.onerror = (e) => {
+            console.error("FileReader error:", e);
+            setPageError("Error reading file. Please try again or use a different file.");
+            setSelectedFile(null); 
+            setCsvFileContent(''); 
+        };
         reader.readAsText(file);
       } else {
         setSelectedFile(null);
         setCsvFileContent('');
-        setError('Invalid file type. Please upload a CSV file.');
+        setPageError('Invalid file type. Please upload a CSV file.');
       }
     }
   };
@@ -122,11 +128,11 @@ export default function ImportTransactionsPage() {
 
   const handleProceedToMapping = async () => {
     if (!selectedFile || !selectedAccountId || !csvFileContent) {
-      setError('Please select a file, an account, and ensure file content is loaded.');
+      setPageError('Please select a file, an account, and ensure file content is loaded.');
       return;
     }
     setIsLoading(true);
-    setError(null);
+    setPageError(null);
     setCurrentTaskMessage('Parsing CSV and suggesting column mappings...');
     setProgressValue(10);
 
@@ -134,14 +140,12 @@ export default function ImportTransactionsPage() {
     setCsvHeaders(parsedHeaders);
     setCsvPreview(parsedPreviewRows);
     
-    // Also parse full data for later use, don't set to preview state
     const { rows: fullDataRows } = parseCsvContent(csvFileContent, false);
     setCsvDataRows(fullDataRows);
 
 
     try {
       setProgressValue(30);
-      // Use first 10 lines for AI mapping suggestion for performance
       const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n');
       const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: aiMapInputCsv });
       if (aiResult && Array.isArray(aiResult.columnMappings)) {
@@ -163,7 +167,7 @@ export default function ImportTransactionsPage() {
       }
     } catch (aiMapError) {
       console.error("AI Column Mapping Error:", aiMapError);
-      setError('AI column mapping failed. Please map columns manually.');
+      setPageError('AI column mapping failed. Please map columns manually.');
       toast({ title: "AI Mapping Failed", description: (aiMapError as Error).message || "Could not map columns using AI.", variant: "destructive" });
       const fallbackMap = parsedHeaders.reduce((acc, header) => ({ ...acc, [header]: '' }), {});
       setColumnMap(fallbackMap);
@@ -180,16 +184,14 @@ export default function ImportTransactionsPage() {
   
   const handleProceedToAICategorization = async () => {
      if (Object.values(columnMap).filter(field => field !== '').length === 0) {
-       setError('Please map at least one CSV column to a transaction field.');
+       setPageError('Please map at least one CSV column to a transaction field.');
        toast({ title: "Mapping Incomplete", description: "At least one column must be mapped.", variant: "destructive"});
        return;
     }
     const mappedCategoryHeader = Object.keys(columnMap).find(header => columnMap[header] === 'category');
     if (!mappedCategoryHeader) {
         toast({ title: "No Category Column Mapped", description: "Skipping AI categorization. You can map a category column to enable this.", variant: "default" });
-        // If no category column, skip to review/final import step directly
-        // For now, we'll just log and proceed to show the structure, actual import will handle this
-        setImportStep('review'); // Or 'complete' if review step is removed
+        setImportStep('review');
         setProgressValue(90);
         return;
     }
@@ -202,7 +204,7 @@ export default function ImportTransactionsPage() {
     const csvCategoryColumnName = Object.keys(columnMap).find(h => columnMap[h] === 'category');
     if (!csvCategoryColumnName) {
       setCurrentTaskMessage('Category column not mapped. Skipping AI categorization.');
-      setImportStep('review'); // Or directly to processing transactions
+      setImportStep('review'); 
       setIsLoading(false);
       setProgressValue(80);
       return;
@@ -211,7 +213,7 @@ export default function ImportTransactionsPage() {
     const uniqueCsvCategories = Array.from(new Set(csvDataRows.map(row => row[csvCategoryColumnName]).filter(cat => cat && cat.trim() !== '')));
     const existingDbCategoryNames = new Set(dbCategories.map(cat => cat.name.toLowerCase()));
     const currentDbCategoriesByName = dbCategories.reduce((acc, cat) => {
-      acc[cat.name.toLowerCase()] = cat.name; // Store original casing
+      acc[cat.name.toLowerCase()] = cat.name; 
       return acc;
     }, {} as Record<string, string>);
 
@@ -229,7 +231,7 @@ export default function ImportTransactionsPage() {
       } else {
         try {
           const aiResult: CategorizeTransactionOutput = await categorizeTransaction({
-            transactionDescription: csvCategory, // Treat CSV category string as description for matching
+            transactionDescription: csvCategory, 
             availableCategories: dbCategories.map(c => c.name)
           });
 
@@ -239,8 +241,7 @@ export default function ImportTransactionsPage() {
             tempAiCategoryMap[csvCategory] = suggestedDbCategoryMatch.name;
             localProcessingLog.push(`AI mapped CSV "${csvCategory}" to existing DB category "${suggestedDbCategoryMatch.name}" (Confidence: ${aiResult.confidence.toFixed(2)}).`);
           } else {
-            // AI suggested something new or low confidence for existing match
-            tempAiCategoryMap[csvCategory] = csvCategory; // Use original CSV category for now
+            tempAiCategoryMap[csvCategory] = csvCategory; 
             if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
               categoriesToCreate.push(csvCategory);
               localProcessingLog.push(`AI suggests "${csvCategory}" is a new category (or low confidence match). Marked for creation.`);
@@ -248,13 +249,13 @@ export default function ImportTransactionsPage() {
           }
         } catch (aiError) {
           localProcessingLog.push(`Error processing category "${csvCategory}" with AI: ${(aiError as Error).message}. Using original.`);
-          tempAiCategoryMap[csvCategory] = csvCategory; // Fallback to original
+          tempAiCategoryMap[csvCategory] = csvCategory; 
            if (!existingDbCategoryNames.has(csvCategory.toLowerCase()) && !categoriesToCreate.find(ctc => ctc.toLowerCase() === csvCategory.toLowerCase())) {
               categoriesToCreate.push(csvCategory);
            }
         }
       }
-      setCategoryProcessingLog([...localProcessingLog]); // Update log progressively
+      setCategoryProcessingLog([...localProcessingLog]); 
     }
     
     setAiCategoryMap(tempAiCategoryMap);
@@ -268,14 +269,12 @@ export default function ImportTransactionsPage() {
       let newCategoriesAddedCount = 0;
       for (const catNameToCreate of categoriesToCreate) {
         try {
-          // Check again to prevent race conditions if multiple CSV cats resolve to same new name
           const currentExistingLower = new Set([...dbCategories.map(c => c.name.toLowerCase()), ...Object.values(tempAiCategoryMap).map(c => c.toLowerCase())]);
           if (!currentExistingLower.has(catNameToCreate.toLowerCase())) {
             await addCategory({ name: catNameToCreate });
             newCategoriesAddedCount++;
             localProcessingLog.push(`Successfully created new category: "${catNameToCreate}".`);
-            // Add to our local understanding of DB categories to prevent re-creation attempts
-            dbCategories.push({id: 'temp-' + catNameToCreate, name: catNameToCreate }); // Simplistic update
+            dbCategories.push({id: 'temp-' + catNameToCreate, name: catNameToCreate }); 
             existingDbCategoryNames.add(catNameToCreate.toLowerCase());
             currentDbCategoriesByName[catNameToCreate.toLowerCase()] = catNameToCreate;
           } else {
@@ -288,7 +287,6 @@ export default function ImportTransactionsPage() {
       }
       if (newCategoriesAddedCount > 0) {
         toast({ title: "Categories Created", description: `${newCategoriesAddedCount} new categories added to database.` });
-        // Re-fetch all categories to get actual IDs and ensure consistency
         const updatedDbCats = await getCategories();
         setDbCategories(updatedDbCats);
       }
@@ -312,7 +310,7 @@ export default function ImportTransactionsPage() {
             }
         } catch (e) { /* try next format */ }
     }
-    try { // Attempt direct ISO parsing or common date constructor behavior
+    try { 
         const parsed = new Date(dateStr);
          if (!isNaN(parsed.valueOf()) && parsed.getFullYear() > 1900 && parsed.getFullYear() < 2100) {
             return formatDateFns(parsed, 'yyyy-MM-dd');
@@ -326,22 +324,22 @@ export default function ImportTransactionsPage() {
   const handleSubmitImport = async (event?: FormEvent) => {
     event?.preventDefault();
     if (!selectedFile || !selectedAccountId || Object.keys(columnMap).length === 0) {
-      setError('File, account, and column mappings are required.');
+      setPageError('File, account, and column mappings are required.');
       return;
     }
     
     const mappedFields = Object.values(columnMap).filter(field => field !== '');
     if (mappedFields.length === 0) {
-       setError('Please map at least one CSV column to a transaction field.');
+       setPageError('Please map at least one CSV column to a transaction field.');
        return;
     }
     if (!mappedFields.includes('date') || !mappedFields.includes('amount') || !mappedFields.includes('description')) {
-        setError('Essential fields (date, amount, description) must be mapped.');
+        setPageError('Essential fields (date, amount, description) must be mapped.');
         return;
     }
 
     setIsLoading(true);
-    setError(null);
+    setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
     setCurrentTaskMessage('Importing transactions...');
@@ -366,7 +364,7 @@ export default function ImportTransactionsPage() {
         const finalCategoryName = aiCategoryMap[originalCsvCategoryStr] || originalCsvCategoryStr || 'Uncategorized';
         
         const parsedDate = parseDateString(transactionDateStr);
-        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,"")); // Clean amount string
+        const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
 
         if (!parsedDate) {
           localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
@@ -407,11 +405,11 @@ export default function ImportTransactionsPage() {
         }
         setSuccessMessage(`${importedCount} transaction(s) imported successfully for account ${accounts.find(a=>a.id === selectedAccountId)?.name}.`);
       } else if (localImportErrors.length > 0 && importedCount === 0) {
-         setError(`No transactions were imported. See errors below.`);
+         setPageError(`No transactions were imported. See issues below.`);
       } else if (localImportErrors.length === 0 && importedCount === 0 && csvDataRows.length > 0) {
-         setError(`No transactions were imported. The file might have been processed, but no valid transactions were found or created.`);
+         setPageError(`No transactions were imported. The file might have been processed, but no valid transactions were found or created.`);
       } else if (csvDataRows.length === 0) {
-         setError(`No data rows found in the CSV file after the header.`);
+         setPageError(`No data rows found in the CSV file after the header.`);
       }
 
 
@@ -430,7 +428,7 @@ export default function ImportTransactionsPage() {
   const resetForm = () => {
     setSelectedFile(null);
     setSelectedAccountId('');
-    setError(null);
+    setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
     setCategoryProcessingLog([]);
@@ -444,7 +442,6 @@ export default function ImportTransactionsPage() {
     setProgressValue(0);
     setIsLoading(false);
     setCurrentTaskMessage('');
-    // Re-fetch categories in case some were added in a previous incomplete import
     fetchRequiredData();
   };
 
@@ -466,11 +463,11 @@ export default function ImportTransactionsPage() {
       )}
       {importStep !== 'complete' && <Progress value={progressValue} className="w-full mb-4" />}
 
-      {error && (
+      {pageError && (
         <Alert variant="destructive">
           <XCircle className="h-4 w-4" />
           <AlertTitle>Error</AlertTitle>
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{pageError}</AlertDescription>
         </Alert>
       )}
       {successMessage && importStep === 'complete' && (
@@ -506,26 +503,26 @@ export default function ImportTransactionsPage() {
               <Select
                 value={selectedAccountId}
                 onValueChange={setSelectedAccountId}
-                disabled={isAccountsLoading || !!accountsError || accounts.length === 0}
+                disabled={isAccountsLoading || !!pageError || accounts.length === 0}
               >
                 <SelectTrigger id="account-select">
                   <SelectValue placeholder={
                     isAccountsLoading ? "Loading accounts..." :
-                    accountsError ? "Error loading accounts" :
+                    pageError && accounts.length === 0 ? "Error loading accounts" : // Show specific error if accounts failed and list is empty
                     accounts.length === 0 ? "No accounts available" :
                     "Select an account"
                   } />
                 </SelectTrigger>
                 <SelectContent>
-                  {accounts.length > 0 && !isAccountsLoading && !accountsError && accounts.map(acc => (
+                  {accounts.length > 0 && !isAccountsLoading && accounts.map(acc => (
                     <SelectItem key={acc.id} value={acc.id}>{acc.name} ({acc.type})</SelectItem>
                   ))}
-                   {accounts.length === 0 && !isAccountsLoading && !accountsError && (
+                   {accounts.length === 0 && !isAccountsLoading && !pageError && (
                      <div className="p-2 text-sm text-muted-foreground">No accounts found. Please add an account on the Accounts page.</div>
                    )}
                 </SelectContent>
               </Select>
-              {accountsError && <p className="text-xs text-destructive">{accountsError}</p>}
+              {pageError && accounts.length === 0 && <p className="text-xs text-destructive">{pageError}</p>}
             </div>
             <div className="space-y-2">
               <Label htmlFor="file-upload">CSV File</Label>
@@ -545,7 +542,7 @@ export default function ImportTransactionsPage() {
           <CardFooter className="justify-end">
             <Button
               onClick={handleProceedToMapping}
-              disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!accountsError || !csvFileContent}
+              disabled={!selectedFile || !selectedAccountId || isLoading || isAccountsLoading || !!pageError || !csvFileContent}
             >
               {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowRight className="mr-2 h-4 w-4" />}
               Proceed to Column Mapping
@@ -615,7 +612,7 @@ export default function ImportTransactionsPage() {
               )}
             </CardContent>
             <CardFooter className="justify-between">
-               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setError(null); }}>Back</Button>
+               <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setPageError(null); }}>Back</Button>
                <Button onClick={handleProceedToAICategorization} disabled={isLoading}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Brain className="mr-2 h-4 w-4" />}
                 Proceed to AI Categorization
