@@ -34,7 +34,7 @@ interface CsvRow {
 export default function ImportTransactionsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [isAccountsLoading, setIsAccountsLoading] = useState(true);
-  const [pageError, setPageError] = useState<string | null>(null); // Consolidated error state
+  const [pageError, setPageError] = useState<string | null>(null); 
 
   const [dbCategories, setDbCategories] = useState<CategoryType[]>([]);
 
@@ -88,14 +88,14 @@ export default function ImportTransactionsPage() {
       const file = event.target.files[0];
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
-        setPageError(null); // Clear previous errors
+        setPageError(null); 
         const reader = new FileReader();
         reader.onload = (e) => {
             setCsvFileContent(e.target?.result as string);
         };
-        reader.onerror = (e) => {
-            console.error("FileReader error:", e);
-            setPageError("Error reading file. Please try again or use a different file.");
+        reader.onerror = () => {
+            console.error("FileReader error:", reader.error);
+            setPageError(`Error reading file: ${reader.error?.message || 'Unknown read error'}. Please try again or use a different file.`);
             setSelectedFile(null); 
             setCsvFileContent(''); 
         };
@@ -508,7 +508,7 @@ export default function ImportTransactionsPage() {
                 <SelectTrigger id="account-select">
                   <SelectValue placeholder={
                     isAccountsLoading ? "Loading accounts..." :
-                    pageError && accounts.length === 0 ? "Error loading accounts" : // Show specific error if accounts failed and list is empty
+                    pageError && accounts.length === 0 ? "Error loading accounts" : 
                     accounts.length === 0 ? "No accounts available" :
                     "Select an account"
                   } />
