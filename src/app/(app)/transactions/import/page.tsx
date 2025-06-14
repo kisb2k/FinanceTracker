@@ -23,8 +23,8 @@ import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
-const AI_CONFIDENCE_THRESHOLD = 0.7; // For confidently mapping to an existing category
-const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5; // For considering AI's suggestion as a new category name
+const AI_CONFIDENCE_THRESHOLD = 0.7; 
+const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5; 
 
 type ImportStep = 'upload' | 'map_columns' | 'processing' | 'complete';
 
@@ -33,17 +33,17 @@ interface CsvRow {
 }
 
 interface ImportedTransactionPlaceholder {
-  id: string; // Placeholder, actual ID will come from Firestore
-  originalData: AddTransactionData;
-  originalCsvCategory: string;
+  id: string; 
+  originalData: AddTransactionData; 
+  originalCsvCategory: string; // The category string as it appeared in the CSV or "Uncategorized" if empty/unmapped
 }
 
 interface CategoryProcessingResult {
   originalCsvCategory: string;
   aiSuggestedCategory?: string;
   aiConfidence?: number;
-  finalCategoryToUse: string; // This will be the name of a category in the DB
-  actionTaken: 'direct_db_match' | 'ai_matched_to_db' | 'ai_suggested_new_and_created' | 'ai_suggested_used_existing_after_check' | 'original_used_as_new_and_created' | 'failed_to_create_used_original_for_tx' | 'error_in_ai_used_original_for_tx';
+  finalCategoryToUse: string; 
+  actionTaken: 'direct_db_match' | 'ai_matched_to_db' | 'ai_suggested_new_and_created' | 'original_used_as_new_and_created' | 'ai_suggestion_resolved_to_existing_db' | 'creation_failed_resolved_to_existing_db' | 'creation_failed_defaulted_to_uncategorized' | 'ai_error_defaulted_to_uncategorized';
   notes: string;
 }
 
@@ -172,7 +172,7 @@ export default function ImportTransactionsPage() {
 
     try {
       setProgressValue(30);
-      const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n'); // Use first 10 lines for AI mapping
+      const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n'); 
       const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: aiMapInputCsv });
       
       if (aiResult && Array.isArray(aiResult.columnMappings)) {
@@ -242,7 +242,9 @@ export default function ImportTransactionsPage() {
     let transactionsToUpdateCount = 0;
 
     const uniqueOriginalCsvCategories = Array.from(new Set(
-      initiallyImportedPlaceholders.map(p => p.originalCsvCategory).filter(cat => cat)
+      initiallyImportedPlaceholders
+        .map(p => p.originalCsvCategory)
+        .filter(cat => cat && cat.trim() !== '' && cat.toLowerCase() !== 'uncategorized') // Exclude "Uncategorized" and empty strings
     ));
 
     setCurrentTaskMessage('Phase 2: AI analyzing categories...');
@@ -250,120 +252,108 @@ export default function ImportTransactionsPage() {
       const originalCsvCat = uniqueOriginalCsvCategories[i];
       setProgressValue(70 + Math.floor(((i + 1) / uniqueOriginalCsvCategories.length) * 15)); // 70-85%
 
+      let finalCategoryToUse = "Uncategorized"; // Default fallback for this originalCsvCat
+      let actionTaken: CategoryProcessingResult['actionTaken'] = 'ai_error_defaulted_to_uncategorized'; // Default action
+      let notes = `Starting analysis for CSV category: "${originalCsvCat}".`;
+      let aiSuggestedName: string | undefined = undefined;
+      let aiConfidence: number | undefined = undefined;
+
       const existingDbMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
 
       if (existingDbMatch) {
-        categoryUpdateMap.set(originalCsvCat, existingDbMatch.name);
-        localProcessingLog.push({
-          originalCsvCategory: originalCsvCat,
-          finalCategoryToUse: existingDbMatch.name,
-          actionTaken: 'direct_db_match',
-          notes: `Directly matched to existing DB category: "${existingDbMatch.name}".`
-        });
-        continue;
-      }
-
-      try {
-        const aiResult = await categorizeTransaction({
-          transactionDescription: originalCsvCat,
-          availableCategories: tempDbCategories.map(c => c.name)
-        });
-        const aiSuggestedName = aiResult.suggestedCategory.trim();
-        const aiConfidence = aiResult.confidence;
-
-        const aiSuggestionMatchesExistingDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
-
-        if (aiSuggestionMatchesExistingDb && aiConfidence >= AI_CONFIDENCE_THRESHOLD) {
-          categoryUpdateMap.set(originalCsvCat, aiSuggestionMatchesExistingDb.name);
-          localProcessingLog.push({
-            originalCsvCategory: originalCsvCat,
-            aiSuggestedCategory: aiSuggestedName,
-            aiConfidence,
-            finalCategoryToUse: aiSuggestionMatchesExistingDb.name,
-            actionTaken: 'ai_matched_to_db',
-            notes: `AI mapped to existing DB category "${aiSuggestionMatchesExistingDb.name}" (Confidence: ${aiConfidence.toFixed(2)}).`
+        finalCategoryToUse = existingDbMatch.name;
+        actionTaken = 'direct_db_match';
+        notes = `Directly matched to existing DB category: "${existingDbMatch.name}".`;
+      } else {
+        try {
+          const aiResult = await categorizeTransaction({
+            transactionDescription: originalCsvCat, // Use original category string from CSV as "description"
+            availableCategories: tempDbCategories.map(c => c.name)
           });
-        } else {
-          let candidateForNewCategory = (aiSuggestedName && aiConfidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD) ? aiSuggestedName : originalCsvCat;
-          
-          const candidateAlreadyExistsInDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
+          aiSuggestedName = aiResult.suggestedCategory.trim();
+          aiConfidence = aiResult.confidence;
 
-          if (candidateAlreadyExistsInDb) {
-            categoryUpdateMap.set(originalCsvCat, candidateAlreadyExistsInDb.name);
-            localProcessingLog.push({
-              originalCsvCategory: originalCsvCat,
-              aiSuggestedCategory: aiSuggestedName, // Log what AI said
-              aiConfidence,
-              finalCategoryToUse: candidateAlreadyExistsInDb.name,
-              actionTaken: 'ai_suggested_used_existing_after_check',
-              notes: `AI suggestion ("${aiSuggestedName}") or original ("${originalCsvCat}") resolved to existing DB category "${candidateAlreadyExistsInDb.name}".`
-            });
+          const aiSuggestionMatchesExistingDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
+
+          if (aiSuggestionMatchesExistingDb && aiConfidence >= AI_CONFIDENCE_THRESHOLD) {
+            finalCategoryToUse = aiSuggestionMatchesExistingDb.name;
+            actionTaken = 'ai_matched_to_db';
+            notes = `AI mapped to existing DB category "${aiSuggestionMatchesExistingDb.name}" (Confidence: ${aiConfidence.toFixed(2)}).`;
           } else {
-            // Attempt to create the new category
-            try {
-              const newDbCat = await addCategory({ name: candidateForNewCategory });
-              tempDbCategories.push(newDbCat); // IMPORTANT: Update local list for subsequent AI calls
-              categoryUpdateMap.set(originalCsvCat, newDbCat.name);
-              localProcessingLog.push({
-                originalCsvCategory: originalCsvCat,
-                aiSuggestedCategory: aiSuggestedName,
-                aiConfidence,
-                finalCategoryToUse: newDbCat.name,
-                actionTaken: candidateForNewCategory === originalCsvCat ? 'original_used_as_new_and_created' : 'ai_suggested_new_and_created',
-                notes: `Successfully created new DB category: "${newDbCat.name}" based on "${candidateForNewCategory}".`
-              });
-            } catch (createError) {
-               // If creation failed (e.g. duplicate name with different casing that addCategory caught)
-               // Try to find it again in the *potentially updated* master dbCategories list
-               const refreshedDbCategories = await getCategories();
-               setDbCategories(refreshedDbCategories); // Update main state
-               tempDbCategories = [...refreshedDbCategories]; // Update local for this loop
+            let candidateForNewCategory = (aiSuggestedName && aiConfidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD) ? aiSuggestedName : originalCsvCat;
+            candidateForNewCategory = candidateForNewCategory.trim(); // Ensure no leading/trailing spaces
 
-               const finalCheckMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
-               if (finalCheckMatch) {
-                  categoryUpdateMap.set(originalCsvCat, finalCheckMatch.name);
-                  localProcessingLog.push({
-                    originalCsvCategory: originalCsvCat,
-                    finalCategoryToUse: finalCheckMatch.name,
-                    actionTaken: 'failed_to_create_used_original_for_tx', // Technically used existing after failed create
-                    notes: `Failed to create "${candidateForNewCategory}", but found matching DB category "${finalCheckMatch.name}" after re-fetch. Using it.`
-                  });
-               } else {
-                  categoryUpdateMap.set(originalCsvCat, originalCsvCat); // Fallback to original
-                  localProcessingLog.push({
-                    originalCsvCategory: originalCsvCat,
-                    finalCategoryToUse: originalCsvCat,
-                    actionTaken: 'failed_to_create_used_original_for_tx',
-                    notes: `Failed to create new category "${candidateForNewCategory}": ${(createError as Error).message}. Using original CSV category for related transactions.`
-                  });
-               }
+            if (!candidateForNewCategory) { // If candidate becomes empty string
+                notes = `AI suggestion and original CSV category were effectively empty. Defaulting to "Uncategorized".`;
+                actionTaken = 'ai_error_defaulted_to_uncategorized'; // Or a more specific one
+                // finalCategoryToUse remains "Uncategorized"
+            } else {
+                const candidateAlreadyExistsInDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
+
+                if (candidateAlreadyExistsInDb) {
+                    finalCategoryToUse = candidateAlreadyExistsInDb.name;
+                    actionTaken = 'ai_suggestion_resolved_to_existing_db';
+                    notes = `AI suggestion ("${aiSuggestedName}") or original ("${originalCsvCat}") resolved to existing DB category "${candidateAlreadyExistsInDb.name}".`;
+                } else {
+                    try {
+                        const newDbCat = await addCategory({ name: candidateForNewCategory });
+                        tempDbCategories.push(newDbCat); 
+                        finalCategoryToUse = newDbCat.name;
+                        actionTaken = candidateForNewCategory === originalCsvCat ? 'original_used_as_new_and_created' : 'ai_suggested_new_and_created';
+                        notes = `Successfully created new DB category: "${newDbCat.name}" based on "${candidateForNewCategory}".`;
+                    } catch (createError) {
+                        notes = `Failed to create new category "${candidateForNewCategory}": ${(createError as Error).message}.`;
+                        const refreshedDbCategories = await getCategories(); // Re-fetch
+                        setDbCategories(refreshedDbCategories);
+                        tempDbCategories = [...refreshedDbCategories];
+                        const finalCheckMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
+                        if (finalCheckMatch) {
+                            finalCategoryToUse = finalCheckMatch.name;
+                            actionTaken = 'creation_failed_resolved_to_existing_db';
+                            notes += ` Found matching DB category "${finalCheckMatch.name}" after re-fetch. Using it.`;
+                        } else {
+                            actionTaken = 'creation_failed_defaulted_to_uncategorized';
+                            notes += ` Defaulting to "Uncategorized".`;
+                            // finalCategoryToUse remains "Uncategorized"
+                        }
+                    }
+                }
             }
           }
+        } catch (aiError) {
+          actionTaken = 'ai_error_defaulted_to_uncategorized';
+          notes = `Error during AI processing for "${originalCsvCat}": ${(aiError as Error).message}. Defaulting to "Uncategorized".`;
+          // finalCategoryToUse remains "Uncategorized"
         }
-      } catch (aiError) {
-        categoryUpdateMap.set(originalCsvCat, originalCsvCat); // Fallback to original
-        localProcessingLog.push({
-          originalCsvCategory: originalCsvCat,
-          finalCategoryToUse: originalCsvCat,
-          actionTaken: 'error_in_ai_used_original_for_tx',
-          notes: `Error during AI processing for "${originalCsvCat}": ${(aiError as Error).message}. Using original CSV category for related transactions.`
-        });
       }
+      
+      categoryUpdateMap.set(originalCsvCat, finalCategoryToUse);
+      localProcessingLog.push({
+        originalCsvCategory: originalCsvCat,
+        aiSuggestedCategory: aiSuggestedName,
+        aiConfidence: aiConfidence,
+        finalCategoryToUse: finalCategoryToUse,
+        actionTaken: actionTaken,
+        notes: notes
+      });
     }
-    setCategoryProcessingLog(prev => [...prev, ...localProcessingLog]); // Update main log
+    setCategoryProcessingLog(prev => [...prev, ...localProcessingLog]);
 
-    // Phase 2.2: Update categories of transactions in Firestore
     setCurrentTaskMessage('Phase 2.2: Updating transaction categories in database...');
     setProgressValue(85);
     const transactionIdsToUpdateByCategory = new Map<string, string[]>();
 
     for(const placeholder of initiallyImportedPlaceholders) {
-        const finalCategoryName = categoryUpdateMap.get(placeholder.originalCsvCategory);
-        if (finalCategoryName && finalCategoryName !== placeholder.originalCsvCategory) { // Only update if different
-            if (!transactionIdsToUpdateByCategory.has(finalCategoryName)) {
-                transactionIdsToUpdateByCategory.set(finalCategoryName, []);
+        // Only consider updating if its original category was part of the AI processing
+        if (placeholder.originalCsvCategory && placeholder.originalCsvCategory.toLowerCase() !== 'uncategorized') {
+            const finalCategoryName = categoryUpdateMap.get(placeholder.originalCsvCategory);
+            // Update if a mapping exists and it's different from what was initially saved
+            if (finalCategoryName && finalCategoryName !== placeholder.originalData.category) { 
+                if (!transactionIdsToUpdateByCategory.has(finalCategoryName)) {
+                    transactionIdsToUpdateByCategory.set(finalCategoryName, []);
+                }
+                transactionIdsToUpdateByCategory.get(finalCategoryName)!.push(placeholder.id);
             }
-            transactionIdsToUpdateByCategory.get(finalCategoryName)!.push(placeholder.id);
         }
     }
     
@@ -382,9 +372,11 @@ export default function ImportTransactionsPage() {
       currentUpdateProgress += txIds.length;
       setProgressValue(85 + Math.floor((currentUpdateProgress / (totalUpdatesToMake || 1)) * 10)); // 85-95%
     }
-    if (tempDbCategories.length !== currentDbCategories.length) {
-        setDbCategories(tempDbCategories); // Reflect newly added categories in the main state
-    }
+
+    // Reflect newly added categories in the main state if tempDbCategories was modified
+    const finalDbCategories = await getCategories();
+    setDbCategories(finalDbCategories);
+
 
     return { updatedTransactionsCount: transactionsToUpdateCount, log: localProcessingLog };
   };
@@ -410,10 +402,10 @@ export default function ImportTransactionsPage() {
     setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
-    setCategoryProcessingLog([]); // Clear previous logs for new import
+    setCategoryProcessingLog([]); 
     setImportStep('processing');
     setCurrentTaskMessage('Phase 1: Saving initial transactions...');
-    setProgressValue(55); // Start of processing
+    setProgressValue(55); 
 
     let importedCount = 0;
     let localImportErrors: string[] = [];
@@ -431,7 +423,11 @@ export default function ImportTransactionsPage() {
       const transactionDateStr = rowData[dateCol] || '';
       const transactionDescriptionStr = rowData[descriptionCol] || '';
       const transactionAmountStr = rowData[amountCol] || '';
-      const originalCsvCategoryStr = categoryCsvHeader ? (rowData[categoryCsvHeader] || '').trim() : 'Uncategorized';
+      
+      let originalCsvCategoryStr = "Uncategorized"; // Default
+      if (categoryCsvHeader && rowData[categoryCsvHeader] && rowData[categoryCsvHeader].trim() !== '') {
+          originalCsvCategoryStr = rowData[categoryCsvHeader].trim();
+      }
       
       const parsedDate = parseDateString(transactionDateStr);
       const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
@@ -454,7 +450,7 @@ export default function ImportTransactionsPage() {
         date: parsedDate,
         description: transactionDescriptionStr,
         amount: parsedAmount,
-        category: originalCsvCategoryStr, // Use original category string initially
+        category: originalCsvCategoryStr, // Use processed original category string
         fileName: selectedFile.name,
       };
 
@@ -462,8 +458,8 @@ export default function ImportTransactionsPage() {
         const savedTx = await addTransaction(transactionToImport);
         newlyImportedPlaceholders.push({ 
             id: savedTx.id, 
-            originalData: transactionToImport, 
-            originalCsvCategory: originalCsvCategoryStr 
+            originalData: transactionToImport, // Store original data for reference
+            originalCsvCategory: originalCsvCategoryStr // This is the key for AI processing
         });
         importedCount++;
       } catch (txError) {
@@ -473,9 +469,8 @@ export default function ImportTransactionsPage() {
     setImportErrors(prev => [...prev, ...localImportErrors]);
 
     if (newlyImportedPlaceholders.length > 0) {
-      // Proceed to AI categorization and update
       const { updatedTransactionsCount, log } = await runAICategorizationAndUpdateTransactions(newlyImportedPlaceholders, dbCategories);
-      // setCategoryProcessingLog(log); // Log is updated inside runAICategorization...
+      // categoryProcessingLog is updated within runAICategorizationAndUpdateTransactions
 
       try {
           await updateAccountLastImported(selectedAccountId);
@@ -734,8 +729,8 @@ export default function ImportTransactionsPage() {
                             {categoryProcessingLog.map((log, idx) => (
                                 <div key={`cat-log-final-${idx}`} className="p-1.5 border-b last:border-b-0">
                                     <p><strong>Original CSV:</strong> "{log.originalCsvCategory}"</p>
-                                    {log.aiSuggestedCategory && <p><strong>AI Suggestion:</strong> "{log.aiSuggestedCategory}" (Confidence: {log.aiConfidence?.toFixed(2)})</p>}
-                                    <p><strong>Action:</strong> <span className={`font-medium ${log.actionTaken.includes('created') ? 'text-green-600' : log.actionTaken.includes('failed') || log.actionTaken.includes('error') ? 'text-orange-600' : ''}`}>{log.actionTaken.replace(/_/g, ' ')}</span></p>
+                                    {log.aiSuggestedCategory && <p><strong>AI Suggestion:</strong> "{log.aiSuggestedCategory}" (Confidence: {log.aiConfidence !== undefined ? log.aiConfidence.toFixed(2) : 'N/A'})</p>}
+                                    <p><strong>Action:</strong> <span className={`font-medium ${log.actionTaken.includes('created') ? 'text-green-600' : log.actionTaken.includes('failed') || log.actionTaken.includes('error') || log.actionTaken.includes('uncategorized') ? 'text-orange-600' : ''}`}>{log.actionTaken.replace(/_/g, ' ')}</span></p>
                                     <p><strong>Final Category Used:</strong> "{log.finalCategoryToUse}"</p>
                                     <p className="text-muted-foreground text-[0.7rem]"><em>Notes: {log.notes}</em></p>
                                 </div>
