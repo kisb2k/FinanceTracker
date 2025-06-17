@@ -21,6 +21,13 @@ import { useToast } from '@/hooks/use-toast';
 // Simulated current spending - will be 0 until transaction integration
 const currentSpending: Record<string, Record<string, number>> = {};
 
+interface TempCategoryLimitItem {
+  categoryId: string;
+  categoryName: string;
+  limit: number;
+  isSelected: boolean;
+}
+
 export default function BudgetsPage() {
   const [budgets, setBudgets] = useState<Budget[]>([]);
   const [allCategories, setAllCategories] = useState<Category[]>([]);
@@ -29,7 +36,7 @@ export default function BudgetsPage() {
   const { toast } = useToast();
 
   const [isBudgetDialogOpen, setIsBudgetDialogOpen] = useState(false);
-  const [editingBudget, setEditingBudget] = useState<Partial<Budget> & { tempCategoryLimits?: BudgetCategoryLimit[] } | null>(null);
+  const [editingBudget, setEditingBudget] = useState<Partial<Budget> & { tempCategoryLimits?: TempCategoryLimitItem[] } | null>(null);
   
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
   const [deletingBudgetId, setDeletingBudgetId] = useState<string | null>(null);
@@ -68,42 +75,60 @@ export default function BudgetsPage() {
         return;
     }
     if (budgetToEdit) {
-      // Ensure tempCategoryLimits includes all available categories, preserving existing limits
       const existingLimitsMap = new Map(budgetToEdit.categoryLimits?.map(cl => [cl.categoryId, cl.limit]));
-      const synchronizedLimits = allCategories.map(cat => ({
+      const synchronizedLimits: TempCategoryLimitItem[] = allCategories.map(cat => ({
         categoryId: cat.id,
+        categoryName: cat.name,
         limit: existingLimitsMap.get(cat.id) || 0,
+        isSelected: existingLimitsMap.has(cat.id),
       }));
       setEditingBudget({ 
         ...budgetToEdit, 
-        tempCategoryLimits: synchronizedLimits
+        tempCategoryLimits: synchronizedLimits.sort((a,b) => a.categoryName.localeCompare(b.categoryName))
       });
     } else {
-      const initialLimits = allCategories.map(cat => ({ categoryId: cat.id, limit: 0 }));
-      setEditingBudget({ name: '', isDefault: false, timePeriod: 'monthly', tempCategoryLimits: initialLimits });
+      const initialLimits: TempCategoryLimitItem[] = allCategories.map(cat => ({ 
+        categoryId: cat.id, 
+        categoryName: cat.name,
+        limit: 0,
+        isSelected: false,
+      }));
+      setEditingBudget({ 
+        name: '', 
+        isDefault: false, 
+        timePeriod: 'monthly', 
+        tempCategoryLimits: initialLimits.sort((a,b) => a.categoryName.localeCompare(b.categoryName))
+      });
     }
     setIsBudgetDialogOpen(true);
   };
 
   const handleSaveBudget = async () => {
     if (!editingBudget || !editingBudget.name || !editingBudget.timePeriod || !editingBudget.tempCategoryLimits) {
-      toast({ title: "Validation Error", description: "Please fill in name, time period, and at least one category limit.", variant: "destructive" });
+      toast({ title: "Validation Error", description: "Please fill in name and time period.", variant: "destructive" });
       return;
     }
 
-    const validCategoryLimits = editingBudget.tempCategoryLimits.filter(cl => cl.limit > 0);
-    if (validCategoryLimits.length === 0) {
-        toast({ title: "Validation Error", description: "Please set a limit for at least one category.", variant: "destructive" });
+    const selectedCategoryLimits = editingBudget.tempCategoryLimits
+        .filter(cl => cl.isSelected)
+        .map(cl => ({ categoryId: cl.categoryId, limit: cl.limit || 0 }));
+
+    if (selectedCategoryLimits.length === 0) {
+        toast({ title: "Validation Error", description: "Please select at least one category for the budget.", variant: "destructive" });
+        return;
+    }
+    if (selectedCategoryLimits.some(cl => cl.limit <= 0)) {
+        toast({ title: "Validation Error", description: "Limits for selected categories must be greater than 0.", variant: "destructive" });
         return;
     }
 
-    const totalBudget = validCategoryLimits.reduce((sum, cl) => sum + (cl.limit || 0), 0);
+    const totalBudget = selectedCategoryLimits.reduce((sum, cl) => sum + (cl.limit || 0), 0);
     
     const budgetDataPayload = {
       name: editingBudget.name!,
       isDefault: editingBudget.isDefault || false,
       timePeriod: editingBudget.timePeriod!,
-      categoryLimits: validCategoryLimits,
+      categoryLimits: selectedCategoryLimits,
       totalBudgetAmount: totalBudget,
     };
 
@@ -124,30 +149,34 @@ export default function BudgetsPage() {
     }
   };
   
-  const handleCategoryLimitChange = (categoryId: string, limitStr: string) => {
-    if (!editingBudget) return;
+  const handleTempCategoryLimitChange = (categoryId: string, limitStr: string) => {
+    if (!editingBudget || !editingBudget.tempCategoryLimits) return;
     const limit = parseFloat(limitStr) || 0; 
 
     setEditingBudget(prev => {
-      if (!prev) return null;
-      let existingLimits = prev.tempCategoryLimits ? [...prev.tempCategoryLimits] : allCategories.map(cat => ({ categoryId: cat.id, limit: 0 }));
-      const limitIndex = existingLimits.findIndex(cl => cl.categoryId === categoryId);
-
-      if (limitIndex > -1) {
-        existingLimits[limitIndex] = { ...existingLimits[limitIndex], limit };
-      } else {
-        // This case should ideally not happen if tempCategoryLimits is initialized correctly
-        existingLimits.push({ categoryId, limit });
-      }
-      
+      if (!prev || !prev.tempCategoryLimits) return null;
       return { 
         ...prev, 
-        tempCategoryLimits: existingLimits.sort((a,b) => 
-          allCategories.findIndex(c=>c.id===a.categoryId) - allCategories.findIndex(c=>c.id===b.categoryId)
-        ) 
+        tempCategoryLimits: prev.tempCategoryLimits.map(cl => 
+            cl.categoryId === categoryId ? { ...cl, limit } : cl
+        ).sort((a,b) => a.categoryName.localeCompare(b.categoryName))
       };
     });
   };
+
+  const handleCategorySelectionChange = (categoryId: string, isSelected: boolean) => {
+    if (!editingBudget || !editingBudget.tempCategoryLimits) return;
+     setEditingBudget(prev => {
+      if (!prev || !prev.tempCategoryLimits) return null;
+      return { 
+        ...prev, 
+        tempCategoryLimits: prev.tempCategoryLimits.map(cl => 
+            cl.categoryId === categoryId ? { ...cl, isSelected, limit: isSelected ? cl.limit : 0 } : cl
+        ).sort((a,b) => a.categoryName.localeCompare(b.categoryName))
+      };
+    });
+  };
+
 
   const openDeleteDialog = (budgetId: string) => {
     setDeletingBudgetId(budgetId);
@@ -253,7 +282,7 @@ export default function BudgetsPage() {
                   )}
                 </CardHeader>
                 <CardContent className="flex-grow space-y-3">
-                  <h4 className="text-sm font-medium text-muted-foreground">Category Limits:</h4>
+                  <h4 className="text-sm font-medium text-muted-foreground">Budgeted Categories:</h4>
                   {budget.categoryLimits && budget.categoryLimits.length > 0 ? budget.categoryLimits.map(cl => {
                     const category = allCategories.find(c => c.id === cl.categoryId);
                     const spent = currentSpending[budget.id]?.[cl.categoryId] || 0;
@@ -270,7 +299,7 @@ export default function BudgetsPage() {
                         <Progress value={Math.min(progress, 100)} className={`mt-1 ${categoryIsOverBudget ? '[&>div]:bg-destructive': ''}`} />
                       </div>
                     );
-                  }) : <p className="text-sm text-muted-foreground">No specific category limits set for this budget.</p>}
+                  }) : <p className="text-sm text-muted-foreground">No specific categories budgeted.</p>}
                 </CardContent>
                 <CardFooter className="flex justify-end gap-2 border-t pt-4 mt-auto">
                   <Button variant="ghost" size="icon" onClick={() => openBudgetDialog(budget)} aria-label="Edit budget">
@@ -291,11 +320,11 @@ export default function BudgetsPage() {
           <DialogHeader>
             <DialogTitle>{editingBudget?.id ? 'Edit' : 'Create New'} Budget</DialogTitle>
             <DialogDescription>
-              Define your budget name, period, and category spending limits.
+              Define budget name, period, and select categories with their spending limits.
             </DialogDescription>
           </DialogHeader>
           {editingBudget && (
-            <div className="grid gap-4 py-4 max-h-[60vh] overflow-y-auto pr-2">
+            <div className="grid gap-4 py-4">
               <div className="grid grid-cols-4 items-center gap-4">
                 <Label htmlFor="budget-name" className="text-right">Name</Label>
                 <Input id="budget-name" value={editingBudget.name || ''} onChange={(e) => setEditingBudget(p => p ? ({ ...p, name: e.target.value }) : null)} className="col-span-3" placeholder="e.g., Monthly Expenses" />
@@ -315,24 +344,32 @@ export default function BudgetsPage() {
                 <Checkbox id="budget-default" checked={editingBudget.isDefault} onCheckedChange={(checked) => setEditingBudget(p => p ? ({...p, isDefault: !!checked}) : null)} className="col-span-3 justify-self-start" />
               </div>
               
-              <h4 className="font-medium mt-4 col-span-4">Category Limits ($)</h4>
-              {allCategories.length > 0 ? allCategories.map(category => {
-                 const currentLimitObj = editingBudget.tempCategoryLimits?.find(cl => cl.categoryId === category.id);
-                 const currentLimitValue = currentLimitObj ? currentLimitObj.limit : 0;
-                 return (
-                  <div key={category.id} className="grid grid-cols-4 items-center gap-4">
-                      <Label htmlFor={`limit-${category.id}`} className="text-right">{category.name}</Label>
-                      <Input 
-                          id={`limit-${category.id}`} 
-                          type="number" 
-                          value={String(currentLimitValue)} 
-                          onChange={(e) => handleCategoryLimitChange(category.id, e.target.value)}
-                          className="col-span-3" 
-                          placeholder="e.g., 200" 
-                      />
-                  </div>
-                 );
-              }) : <p className="col-span-4 text-sm text-muted-foreground">No categories available. Please add categories on the Transactions page first.</p>}
+              <h4 className="font-medium mt-4 col-span-4">Select Categories & Set Limits ($)</h4>
+              <div className="max-h-[40vh] overflow-y-auto space-y-3 pr-2">
+                {editingBudget.tempCategoryLimits && editingBudget.tempCategoryLimits.length > 0 ? 
+                  editingBudget.tempCategoryLimits.map(item => (
+                    <div key={item.categoryId} className="grid grid-cols-12 items-center gap-2 p-2 rounded-md border">
+                        <div className="col-span-1 flex items-center">
+                           <Checkbox 
+                             id={`cat-select-${item.categoryId}`} 
+                             checked={item.isSelected}
+                             onCheckedChange={(checked) => handleCategorySelectionChange(item.categoryId, Boolean(checked))}
+                           />
+                        </div>
+                        <Label htmlFor={`cat-select-${item.categoryId}`} className="col-span-6 truncate" title={item.categoryName}>{item.categoryName}</Label>
+                        <Input 
+                            id={`limit-${item.categoryId}`} 
+                            type="number" 
+                            value={String(item.limit)} 
+                            onChange={(e) => handleTempCategoryLimitChange(item.categoryId, e.target.value)}
+                            className="col-span-5" 
+                            placeholder="e.g., 200"
+                            disabled={!item.isSelected} 
+                        />
+                    </div>
+                  )) 
+                : <p className="col-span-4 text-sm text-muted-foreground text-center">No categories available. Please add categories on the Transactions page first.</p>}
+              </div>
             </div>
           )}
           <DialogFooter>
