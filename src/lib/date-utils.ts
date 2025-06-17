@@ -10,7 +10,10 @@ import {
   subWeeks,
   startOfDay,
   endOfDay,
-  subDays
+  subDays,
+  subYears,
+  differenceInCalendarDays,
+  type Duration
 } from 'date-fns';
 
 export type PeriodOptionValue = 
@@ -23,55 +26,92 @@ export type PeriodOptionValue =
   | 'today'
   | 'yesterday';
 
-export interface DateRange {
-  startDate: Date | null;
-  endDate: Date | null;
+export interface DateRangeResult {
+  current: {
+    startDate: Date | null;
+    endDate: Date | null;
+  };
+  previous: {
+    startDate: Date | null;
+    endDate: Date | null;
+  } | null; // Previous period might not always be applicable (e.g., for 'all_time')
 }
 
-export function getDateRange(period: PeriodOptionValue): DateRange {
+export function getDateRanges(period: PeriodOptionValue): DateRangeResult {
   const today = new Date();
-  let startDate: Date | null = null;
-  let endDate: Date | null = null;
+  let currentStartDate: Date | null = null;
+  let currentEndDate: Date | null = null;
+  let previousStartDate: Date | null = null;
+  let previousEndDate: Date | null = null;
 
   switch (period) {
     case 'current_month':
-      startDate = startOfMonth(today);
-      endDate = endOfMonth(today);
+      currentStartDate = startOfMonth(today);
+      currentEndDate = endOfMonth(today);
+      previousStartDate = startOfMonth(subMonths(today, 1));
+      previousEndDate = endOfMonth(subMonths(today, 1));
       break;
     case 'last_month':
       const lastMonthStart = startOfMonth(subMonths(today, 1));
-      startDate = lastMonthStart;
-      endDate = endOfMonth(lastMonthStart);
+      currentStartDate = lastMonthStart;
+      currentEndDate = endOfMonth(lastMonthStart);
+      const monthBeforeLastStart = startOfMonth(subMonths(today, 2));
+      previousStartDate = monthBeforeLastStart;
+      previousEndDate = endOfMonth(monthBeforeLastStart);
       break;
     case 'year_to_date':
-      startDate = startOfYear(today);
-      endDate = endOfDay(today); // Use endOfDay to include all transactions of today
+      currentStartDate = startOfYear(today);
+      currentEndDate = endOfDay(today);
+      const prevYearStart = startOfYear(subYears(today, 1));
+      // Ensure the 'to-date' part matches for the previous year
+      const daysIntoYear = differenceInCalendarDays(today, startOfYear(today));
+      previousStartDate = prevYearStart;
+      previousEndDate = endOfDay(subDays(startOfDay(prevYearStart), -daysIntoYear)); // Add days to prev year start
       break;
     case 'current_week':
-      startDate = startOfWeek(today, { weekStartsOn: 1 }); // Assuming week starts on Monday
-      endDate = endOfWeek(today, { weekStartsOn: 1 });
+      currentStartDate = startOfWeek(today, { weekStartsOn: 1 });
+      currentEndDate = endOfWeek(today, { weekStartsOn: 1 });
+      previousStartDate = startOfWeek(subWeeks(today, 1), { weekStartsOn: 1 });
+      previousEndDate = endOfWeek(subWeeks(today, 1), { weekStartsOn: 1 });
       break;
     case 'last_week':
       const lastWeekStart = startOfWeek(subWeeks(today, 1), { weekStartsOn: 1 });
-      startDate = lastWeekStart;
-      endDate = endOfWeek(lastWeekStart, { weekStartsOn: 1 });
+      currentStartDate = lastWeekStart;
+      currentEndDate = endOfWeek(lastWeekStart, { weekStartsOn: 1 });
+      const weekBeforeLastStart = startOfWeek(subWeeks(today, 2), { weekStartsOn: 1 });
+      previousStartDate = weekBeforeLastStart;
+      previousEndDate = endOfWeek(weekBeforeLastStart, { weekStartsOn: 1 });
       break;
     case 'today':
-      startDate = startOfDay(today);
-      endDate = endOfDay(today);
+      currentStartDate = startOfDay(today);
+      currentEndDate = endOfDay(today);
+      previousStartDate = startOfDay(subDays(today, 1));
+      previousEndDate = endOfDay(subDays(today, 1));
       break;
     case 'yesterday':
       const yesterdayStart = startOfDay(subDays(today, 1));
-      startDate = yesterdayStart;
-      endDate = endOfDay(yesterdayStart);
+      currentStartDate = yesterdayStart;
+      currentEndDate = endOfDay(yesterdayStart);
+      const dayBeforeYesterdayStart = startOfDay(subDays(today, 2));
+      previousStartDate = dayBeforeYesterdayStart;
+      previousEndDate = endOfDay(dayBeforeYesterdayStart);
       break;
     case 'all_time':
-      startDate = null; // Indicate no start date filter
-      endDate = null;   // Indicate no end date filter
+      currentStartDate = null;
+      currentEndDate = null;
+      // No meaningful previous period for 'all_time' comparison in this context
+      previousStartDate = null;
+      previousEndDate = null;
       break;
-    default: // Should not happen with TypeScript, but good for safety
-      startDate = null;
-      endDate = null;
+    default:
+      currentStartDate = null;
+      currentEndDate = null;
+      previousStartDate = null;
+      previousEndDate = null;
   }
-  return { startDate, endDate };
+  
+  return {
+    current: { startDate: currentStartDate, endDate: currentEndDate },
+    previous: (previousStartDate && previousEndDate) ? { startDate: previousStartDate, endDate: previousEndDate } : null,
+  };
 }

@@ -6,10 +6,9 @@ import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Progress } from "@/components/ui/progress";
+import { Progress } from "@/components/ui/progress"; // Re-add if used directly, or remove if only for budget progress card
 import {
-  ArrowUpRight, DollarSign, TrendingUp, TrendingDown, Activity, PieChart as PieChartIcon, ListFilter, FileText, Loader2, AlertCircle, CalendarDays
+  ArrowUpRight, DollarSign, TrendingUp, TrendingDown, Activity, PieChart as PieChartIcon, ListFilter, FileText, Loader2, AlertCircle, CalendarDays, ArrowDown, ArrowRight
 } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip, Legend as RechartsLegend } from 'recharts';
 
@@ -17,15 +16,16 @@ import type { Account, Transaction, Budget, Category } from '@/lib/types';
 import { getAccounts } from '@/services/accountService';
 import { getTransactions } from '@/services/transactionService';
 import { getBudgets } from '@/services/budgetService';
-import { getCategories } from '@/services/categoryService'; // Needed if budgets don't store category names
+import { getCategories } from '@/services/categoryService';
 import { useToast } from '@/hooks/use-toast';
 import { format, parseISO } from 'date-fns';
-import { getDateRange, type PeriodOptionValue } from '@/lib/date-utils';
+import { getDateRanges, type PeriodOptionValue } from '@/lib/date-utils';
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82Ca9D', '#FFC0CB', '#A52A2A'];
 
 interface DashboardMetrics {
   totalBalance: number;
+  // Current period
   periodIncome: number;
   periodSpending: number;
   budgetTotal: number | null;
@@ -33,6 +33,10 @@ interface DashboardMetrics {
   budgetProgress: number | null;
   isOverBudget: boolean;
   topSpendingCategories: { name: string; value: number }[];
+  // Previous period for comparison
+  prevPeriodIncome: number | null;
+  prevPeriodSpending: number | null;
+  prevBudgetSpent: number | null;
 }
 
 const initialMetrics: DashboardMetrics = {
@@ -44,12 +48,19 @@ const initialMetrics: DashboardMetrics = {
   budgetProgress: null,
   isOverBudget: false,
   topSpendingCategories: [],
+  prevPeriodIncome: null,
+  prevPeriodSpending: null,
+  prevBudgetSpent: null,
 };
 
 const periodOptions: { value: PeriodOptionValue; label: string }[] = [
   { value: 'current_month', label: 'Current Month' },
   { value: 'last_month', label: 'Last Month' },
+  { value: 'current_week', label: 'Current Week' },
+  { value: 'last_week', label: 'Last Week' },
   { value: 'year_to_date', label: 'Year to Date' },
+  { value: 'today', label: 'Today' },
+  { value: 'yesterday', label: 'Yesterday' },
   { value: 'all_time', label: 'All Time' },
 ];
 
@@ -58,7 +69,7 @@ export default function DashboardPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [budgets, setBudgets] = useState<Budget[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]); // Store all categories
+  const [categories, setCategories] = useState<Category[]>([]);
 
   const [selectedBudgetId, setSelectedBudgetId] = useState<string | null>(null);
   const [selectedPeriod, setSelectedPeriod] = useState<PeriodOptionValue>('current_month');
@@ -101,70 +112,101 @@ export default function DashboardPage() {
     fetchData();
   }, [fetchData]);
 
-  useEffect(() => {
-    if (isLoading || error) return;
-
-    const { startDate, endDate } = getDateRange(selectedPeriod);
-
-    const filteredTransactions = transactions.filter(tx => {
-      if (selectedPeriod === 'all_time') return true;
-      const txDate = parseISO(tx.date);
-      return txDate >= startDate! && txDate <= endDate!;
-    });
-
-    const newTotalBalance = accounts.reduce((sum, acc) => sum + acc.balance, 0);
-    const newPeriodIncome = filteredTransactions.filter(tx => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
-    const newPeriodSpending = filteredTransactions.filter(tx => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+  const calculateMetricsForPeriod = (
+    targetTransactions: Transaction[],
+    targetBudget: Budget | undefined,
+    allCategories: Category[]
+  ): Pick<DashboardMetrics, 'periodIncome' | 'periodSpending' | 'budgetSpent' | 'topSpendingCategories' | 'isOverBudget' | 'budgetTotal' | 'budgetProgress'> => {
     
-    let budgetTotal: number | null = null;
-    let budgetSpent: number | null = null;
-    let budgetProgress: number | null = null;
-    let isOverBudget = false;
-    let topSpendingCategoriesData: { name: string; value: number }[] = [];
+    const income = targetTransactions.filter(tx => tx.amount > 0).reduce((sum, tx) => sum + tx.amount, 0);
+    const spending = targetTransactions.filter(tx => tx.amount < 0).reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
+    
+    let bTotal: number | null = null;
+    let bSpent: number | null = null;
+    let bProgress: number | null = null;
+    let isOverB = false;
+    let topSpendingCats: { name: string; value: number }[] = [];
 
-    const currentBudget = budgets.find(b => b.id === selectedBudgetId);
-
-    if (currentBudget && currentBudget.categoryLimits) {
-      budgetTotal = currentBudget.totalBudgetAmount || currentBudget.categoryLimits.reduce((sum, cl) => sum + cl.limit, 0);
+    if (targetBudget && targetBudget.categoryLimits) {
+      bTotal = targetBudget.totalBudgetAmount || targetBudget.categoryLimits.reduce((sum, cl) => sum + cl.limit, 0);
       let totalSpentForBudget = 0;
-      
       const spendingByCat: Record<string, number> = {};
 
-      currentBudget.categoryLimits.forEach(limit => {
-        const categoryName = categories.find(c => c.id === limit.categoryId)?.name || 'Unknown Category';
-        const spendingInCat = filteredTransactions
+      targetBudget.categoryLimits.forEach(limit => {
+        const categoryName = allCategories.find(c => c.id === limit.categoryId)?.name || 'Unknown Category';
+        const spendingInCat = targetTransactions
           .filter(tx => tx.category === categoryName && tx.amount < 0)
           .reduce((sum, tx) => sum + Math.abs(tx.amount), 0);
         
         totalSpentForBudget += spendingInCat;
         if (spendingInCat > 0) {
-            spendingByCat[categoryName] = (spendingByCat[categoryName] || 0) + spendingInCat;
+          spendingByCat[categoryName] = (spendingByCat[categoryName] || 0) + spendingInCat;
         }
       });
       
-      budgetSpent = totalSpentForBudget;
-      if (budgetTotal > 0) {
-        budgetProgress = (budgetSpent / budgetTotal) * 100;
-        isOverBudget = budgetSpent > budgetTotal;
+      bSpent = totalSpentForBudget;
+      if (bTotal > 0) {
+        bProgress = (bSpent / bTotal) * 100;
+        isOverB = bSpent > bTotal;
       } else {
-        budgetProgress = budgetSpent > 0 ? 100 : 0; // If limit is 0, any spending is "over"
-        isOverBudget = budgetSpent > 0;
+        bProgress = bSpent > 0 ? 100 : 0;
+        isOverB = bSpent > 0;
       }
-      topSpendingCategoriesData = Object.entries(spendingByCat)
+      topSpendingCats = Object.entries(spendingByCat)
         .map(([name, value]) => ({ name, value }))
         .sort((a, b) => b.value - a.value)
-        .slice(0, 5); // Top 5 categories
+        .slice(0, 5);
     }
+    
+    return {
+      periodIncome: income,
+      periodSpending: spending,
+      budgetSpent: bSpent,
+      topSpendingCategories: topSpendingCats,
+      isOverBudget: isOverB,
+      budgetTotal: bTotal,
+      budgetProgress: bProgress
+    };
+  };
+
+
+  useEffect(() => {
+    if (isLoading || error || transactions.length === 0) return;
+
+    const { current: currentRange, previous: previousRange } = getDateRanges(selectedPeriod);
+
+    const filterTransactionsByDate = (dateRange: {startDate: Date | null, endDate: Date | null} | null) => {
+        if (!dateRange) return [];
+        return transactions.filter(tx => {
+            if (selectedPeriod === 'all_time' || !dateRange.startDate || !dateRange.endDate) return true; // 'all_time' handled by null dateRange
+            const txDate = parseISO(tx.date);
+            return txDate >= dateRange.startDate && txDate <= dateRange.endDate;
+        });
+    };
+    
+    const currentPeriodTransactions = filterTransactionsByDate(currentRange);
+    const previousPeriodTransactions = filterTransactionsByDate(previousRange);
+    
+    const newTotalBalance = accounts.reduce((sum, acc) => sum + acc.balance, 0);
+    const currentBudget = budgets.find(b => b.id === selectedBudgetId);
+
+    const currentMetrics = calculateMetricsForPeriod(currentPeriodTransactions, currentBudget, categories);
+    const previousMetricsResults = previousRange 
+      ? calculateMetricsForPeriod(previousPeriodTransactions, currentBudget, categories) 
+      : { periodIncome: null, periodSpending: null, budgetSpent: null, topSpendingCategories: [], isOverBudget: false, budgetTotal: null, budgetProgress: null };
 
     setMetrics({
       totalBalance: newTotalBalance,
-      periodIncome: newPeriodIncome,
-      periodSpending: newPeriodSpending,
-      budgetTotal,
-      budgetSpent,
-      budgetProgress,
-      isOverBudget,
-      topSpendingCategories: topSpendingCategoriesData,
+      periodIncome: currentMetrics.periodIncome,
+      periodSpending: currentMetrics.periodSpending,
+      budgetTotal: currentMetrics.budgetTotal,
+      budgetSpent: currentMetrics.budgetSpent,
+      budgetProgress: currentMetrics.budgetProgress,
+      isOverBudget: currentMetrics.isOverBudget,
+      topSpendingCategories: currentMetrics.topSpendingCategories,
+      prevPeriodIncome: previousMetricsResults.periodIncome,
+      prevPeriodSpending: previousMetricsResults.periodSpending,
+      prevBudgetSpent: previousMetricsResults.budgetSpent,
     });
 
     setRecentTransactions(
@@ -172,6 +214,36 @@ export default function DashboardPage() {
     );
 
   }, [transactions, accounts, budgets, categories, selectedBudgetId, selectedPeriod, isLoading, error]);
+
+  const formatComparison = (current: number | null, previous: number | null) => {
+    if (current === null || previous === null || previous === 0) {
+      return ""; // No comparison if data missing or prev is zero
+    }
+    const change = current - previous;
+    const percentageChange = (change / previous) * 100;
+    const sign = change >= 0 ? '+' : '';
+    const percentSign = percentageChange >= 0 ? '+' : '';
+    
+    return (
+      <span className={`text-xs ml-1 ${change >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+        ({sign}${change.toFixed(2)}, {percentSign}{percentageChange.toFixed(1)}%)
+      </span>
+    );
+  };
+   const formatBudgetComparison = (currentSpent: number | null, previousSpent: number | null, budgetTotal: number | null) => {
+    if (currentSpent === null || previousSpent === null || budgetTotal === null || budgetTotal === 0) return "";
+    
+    const currentUtil = (currentSpent / budgetTotal) * 100;
+    const previousUtil = (previousSpent / budgetTotal) * 100;
+    const changeInUtil = currentUtil - previousUtil;
+    const sign = changeInUtil >= 0 ? '+' : '';
+
+    return (
+      <span className={`text-xs ml-1 ${changeInUtil >= 0 ? 'text-red-600' : 'text-green-600'}`}>
+        ({sign}{changeInUtil.toFixed(1)}% utilization change)
+      </span>
+    );
+  };
 
 
   if (isLoading) {
@@ -203,16 +275,27 @@ export default function DashboardPage() {
   const selectedBudgetName = budgets.find(b => b.id === selectedBudgetId)?.name || "No Budget Selected";
 
   const summaryStats = [
-    { title: "Total Balance", value: `$${metrics.totalBalance.toFixed(2)}`, icon: DollarSign, href:"/accounts" },
-    { title: "Spending", value: `$${metrics.periodSpending.toFixed(2)}`, icon: TrendingDown, href:"/transactions" },
-    { title: "Income", value: `$${metrics.periodIncome.toFixed(2)}`, icon: TrendingUp, href:"/transactions" },
+    { title: "Total Balance", value: `$${metrics.totalBalance.toFixed(2)}`, icon: DollarSign, href:"/accounts", comparisonText: "" },
+    { 
+      title: "Spending", 
+      value: `$${metrics.periodSpending.toFixed(2)}`, 
+      icon: TrendingDown, href:"/transactions",
+      comparisonText: selectedPeriod !== 'all_time' ? formatComparison(metrics.periodSpending, metrics.prevPeriodSpending) : ""
+    },
+    { 
+      title: "Income", 
+      value: `$${metrics.periodIncome.toFixed(2)}`, 
+      icon: TrendingUp, href:"/transactions",
+      comparisonText: selectedPeriod !== 'all_time' ? formatComparison(metrics.periodIncome, metrics.prevPeriodIncome) : ""
+    },
     { 
       title: selectedBudgetId ? `Budget: ${selectedBudgetName}` : "Budget Progress", 
       value: metrics.budgetProgress !== null ? `${metrics.budgetProgress.toFixed(0)}% Utilized` : "N/A", 
       subValue: metrics.budgetSpent !== null && metrics.budgetTotal !== null ? `$${metrics.budgetSpent.toFixed(2)} of $${metrics.budgetTotal.toFixed(2)}` : '',
       isOver: metrics.isOverBudget,
       icon: Activity, 
-      href:"/budgets" 
+      href:"/budgets",
+      comparisonText: selectedPeriod !== 'all_time' ? formatBudgetComparison(metrics.budgetSpent, metrics.prevBudgetSpent, metrics.budgetTotal) : ""
     },
   ];
 
@@ -251,7 +334,10 @@ export default function DashboardPage() {
               <stat.icon className={`h-5 w-5 ${stat.isOver ? 'text-destructive' : 'text-muted-foreground'}`} />
             </CardHeader>
             <CardContent>
-              <div className={`text-2xl font-bold ${stat.isOver ? 'text-destructive' : ''}`}>{stat.value}</div>
+              <div className={`text-2xl font-bold ${stat.isOver ? 'text-destructive' : ''}`}>
+                {stat.value}
+                {stat.comparisonText && <span className="block sm:inline">{stat.comparisonText}</span>}
+              </div>
               {stat.subValue && <p className={`text-xs ${stat.isOver ? 'text-destructive/80' : 'text-muted-foreground'}`}>{stat.subValue}</p>}
               {stat.href && (
                  <Button variant="link" size="sm" className="px-0 -ml-1 mt-1 text-primary" asChild>
