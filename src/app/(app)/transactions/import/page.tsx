@@ -24,25 +24,25 @@ import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
 const AI_CONFIDENCE_THRESHOLD = 0.7;
-const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5;
+const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5; // Lower threshold for AI to suggest a *new* category name
 
-type ImportStep = 'upload' | 'map_columns' | 'ai_category_analysis' | 'review_ai_categories' | 'processing' | 'complete';
+
+type ImportStep = 'upload' | 'map_columns' | 'review_ai_categories' | 'processing' | 'complete';
 
 interface CsvRow {
   [key: string]: string;
 }
 
 interface AiCategoryReviewItem {
-  id: string; // typically originalCsvCategory, or a generated ID if original is empty
+  id: string; 
   originalCsvCategory: string;
-  aiSuggestedDbCategoryMatch?: string; // If AI matched to an existing DB category
-  aiSuggestedNewCategoryName?: string; // If AI suggests creating a new one
+  aiSuggestedDbCategoryMatch?: string; 
+  aiSuggestedNewCategoryName?: string; 
   aiConfidence?: number;
   
-  // User's choice for this originalCsvCategory
-  userDecision: 'ai_suggestion_db_match' | 'ai_suggestion_new' | 'pick_existing' | 'keep_original_as_new' | 'custom_new' | 'no_ai_suggestion_keep_original';
-  finalCategoryName: string; // What will be used for transactions / created. Editable.
-  selectedExistingDbCategoryId?: string; // if userDecision is 'pick_existing'
+  userDecision: 'ai_suggestion_db_match' | 'ai_suggestion_new' | 'pick_existing' | 'keep_original_as_new' | 'custom_new';
+  finalCategoryName: string; 
+  selectedExistingDbCategoryId?: string; 
 }
 
 
@@ -108,7 +108,7 @@ export default function ImportTransactionsPage() {
       if (file.type === 'text/csv' || file.name.endsWith('.csv')) {
         setSelectedFile(file);
         setPageError(null);
-        setCsvFileContent('');
+        setCsvFileContent(''); // Clear previous content
         const reader = new FileReader();
         reader.onload = (e) => {
             setCsvFileContent(e.target?.result as string);
@@ -238,15 +238,11 @@ export default function ImportTransactionsPage() {
     const categoryCsvHeader = Object.keys(columnMap).find(h => columnMap[h] === 'category');
     if (!categoryCsvHeader) {
       toast({ title: "Skipping AI Categorization", description: "Category column not mapped. Proceeding to import.", variant: "default"});
-      setAiCategoryReviewItems([]); // Ensure it's empty
-      setImportStep('processing'); // Skip review if no category column
+      setAiCategoryReviewItems([]); 
+      setImportStep('processing'); 
       setProgressValue(70);
       setCurrentTaskMessage("Preparing to import transactions...");
-      // Directly call handleStartActualImport or a similar function if review is skipped
-      // For now, let's assume it goes to 'processing' and then 'complete'
-      // This might need a direct path to saving transactions if review is truly skipped.
-      // For simplicity now, we'll rely on user clicking "Confirm & Import" even if review list is empty.
-      handleStartActualImport();
+      handleStartActualImport(); // Directly call import without review
       return;
     }
 
@@ -256,7 +252,7 @@ export default function ImportTransactionsPage() {
     setProgressValue(40);
 
     const uniqueCsvCategories = Array.from(new Set(
-      csvDataRows.map(row => (row[categoryCsvHeader] || "").trim())
+      csvDataRows.map(row => (row[categoryCsvHeader!] || "").trim())
                  .filter(cat => cat !== "" && cat.toLowerCase() !== "uncategorized")
     ));
 
@@ -270,65 +266,63 @@ export default function ImportTransactionsPage() {
         return;
     }
 
+    let tempDbCategories = [...dbCategories]; // Use a temporary copy for AI calls within this batch
+
     const reviewItemsPromises = uniqueCsvCategories.map(async (originalCsvCat, index) => {
       setProgressValue(40 + Math.floor(((index + 1) / uniqueCsvCategories.length) * 20));
-      const existingDbMatch = dbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
-
+      
+      const existingDbMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
       if (existingDbMatch) {
         return {
-          id: originalCsvCat,
-          originalCsvCategory: originalCsvCat,
+          id: originalCsvCat, originalCsvCategory: originalCsvCat,
           aiSuggestedDbCategoryMatch: existingDbMatch.name,
-          userDecision: 'ai_suggestion_db_match',
-          finalCategoryName: existingDbMatch.name,
+          userDecision: 'ai_suggestion_db_match', finalCategoryName: existingDbMatch.name,
         } as AiCategoryReviewItem;
       }
 
+      let aiDecision: 'ai_suggestion_db_match' | 'ai_suggestion_new' | 'keep_original_as_new' = 'keep_original_as_new';
+      let finalCatName = originalCsvCat;
+      let suggestedDbMatch: string | undefined = undefined;
+      let suggestedNewName: string | undefined = undefined;
+      let confidence: number | undefined = undefined;
+
       try {
         const aiResult = await categorizeTransaction({
-          transactionDescription: originalCsvCat,
-          availableCategories: dbCategories.map(c => c.name)
+          transactionDescription: originalCsvCat, // Use original CSV category as "description" for AI
+          availableCategories: tempDbCategories.map(c => c.name)
         });
         const aiSuggestedName = aiResult.suggestedCategory.trim();
-        const aiConfidence = aiResult.confidence;
+        confidence = aiResult.confidence;
 
-        const aiSuggestionMatchesExistingDb = dbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
+        const aiSuggestionMatchesExistingDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
 
-        if (aiSuggestionMatchesExistingDb && aiConfidence >= AI_CONFIDENCE_THRESHOLD) {
-          return {
-            id: originalCsvCat,
-            originalCsvCategory: originalCsvCat,
-            aiSuggestedDbCategoryMatch: aiSuggestionMatchesExistingDb.name,
-            aiConfidence: aiConfidence,
-            userDecision: 'ai_suggestion_db_match',
-            finalCategoryName: aiSuggestionMatchesExistingDb.name,
-          } as AiCategoryReviewItem;
-        } else if (aiSuggestedName && aiConfidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD && !aiSuggestionMatchesExistingDb) {
-          return {
-            id: originalCsvCat,
-            originalCsvCategory: originalCsvCat,
-            aiSuggestedNewCategoryName: aiSuggestedName,
-            aiConfidence: aiConfidence,
-            userDecision: 'ai_suggestion_new',
-            finalCategoryName: aiSuggestedName,
-          } as AiCategoryReviewItem;
+        if (aiSuggestionMatchesExistingDb && confidence >= AI_CONFIDENCE_THRESHOLD) {
+          aiDecision = 'ai_suggestion_db_match';
+          finalCatName = aiSuggestionMatchesExistingDb.name;
+          suggestedDbMatch = aiSuggestionMatchesExistingDb.name;
+        } else if (aiSuggestedName && !aiSuggestionMatchesExistingDb && confidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD) {
+          // AI suggests a truly new name with reasonable confidence
+          aiDecision = 'ai_suggestion_new';
+          finalCatName = aiSuggestedName;
+          suggestedNewName = aiSuggestedName;
         }
+        // Otherwise, it defaults to 'keep_original_as_new' and originalCsvCat
       } catch (aiError) {
         console.error(`AI categorization error for "${originalCsvCat}":`, aiError);
         // Fall through to default (keep original)
       }
       
-      // Default if AI fails or doesn't give a confident suggestion
       return {
-        id: originalCsvCat,
-        originalCsvCategory: originalCsvCat,
-        userDecision: 'no_ai_suggestion_keep_original', // Or 'keep_original_as_new'
-        finalCategoryName: originalCsvCat,
+        id: originalCsvCat, originalCsvCategory: originalCsvCat,
+        aiSuggestedDbCategoryMatch: suggestedDbMatch,
+        aiSuggestedNewCategoryName: suggestedNewName,
+        aiConfidence: confidence,
+        userDecision: aiDecision, finalCategoryName: finalCatName,
       } as AiCategoryReviewItem;
     });
 
     const resolvedReviewItems = await Promise.all(reviewItemsPromises);
-    setAiCategoryReviewItems(resolvedReviewItems);
+    setAiCategoryReviewItems(resolvedReviewItems.sort((a,b) => a.originalCsvCategory.localeCompare(b.originalCsvCategory)));
     setImportStep('review_ai_categories');
     setIsLoading(false);
     setProgressValue(60);
@@ -340,22 +334,26 @@ export default function ImportTransactionsPage() {
       prevItems.map(item => {
         if (item.id === originalCatId) {
           const updatedItem = { ...item, [field]: value };
-          // If userDecision changes, reset finalCategoryName or selectedExistingDbCategoryId accordingly
+          
           if (field === 'userDecision') {
             if (value === 'ai_suggestion_db_match') updatedItem.finalCategoryName = item.aiSuggestedDbCategoryMatch || item.originalCsvCategory;
             else if (value === 'ai_suggestion_new') updatedItem.finalCategoryName = item.aiSuggestedNewCategoryName || item.originalCsvCategory;
-            else if (value === 'pick_existing') { /* Keep existing finalCategoryName or prompt user */ }
-            else if (value === 'keep_original_as_new' || value === 'no_ai_suggestion_keep_original') updatedItem.finalCategoryName = item.originalCsvCategory;
-            else if (value === 'custom_new') updatedItem.finalCategoryName = ""; // Clear for user input
-            updatedItem.selectedExistingDbCategoryId = undefined;
+            else if (value === 'pick_existing') { 
+              // finalCategoryName will be set when selectedExistingDbCategoryId changes
+              updatedItem.finalCategoryName = dbCategories.find(c => c.id === updatedItem.selectedExistingDbCategoryId)?.name || '';
+            }
+            else if (value === 'keep_original_as_new') updatedItem.finalCategoryName = item.originalCsvCategory;
+            else if (value === 'custom_new') updatedItem.finalCategoryName = ""; 
+            updatedItem.selectedExistingDbCategoryId = undefined; 
           }
           if (field === 'selectedExistingDbCategoryId' && value !== "") {
              updatedItem.finalCategoryName = dbCategories.find(c => c.id === value)?.name || item.finalCategoryName;
+             updatedItem.userDecision = 'pick_existing'; // Ensure decision reflects this choice
           }
           return updatedItem;
         }
         return item;
-      })
+      }).sort((a,b) => a.originalCsvCategory.localeCompare(b.originalCsvCategory))
     );
   };
 
@@ -384,59 +382,58 @@ export default function ImportTransactionsPage() {
     setCurrentTaskMessage('Phase 1: Processing category decisions...');
     setProgressValue(70); 
 
-    const categoryNameToDbNameMap = new Map<string, string>();
-    let currentDbCategories = [...dbCategories];
+    const categoryNameToFinalNameMap = new Map<string, string>();
+    let currentDbCategories = [...dbCategories]; // Use a mutable copy for this function scope
 
+    // Process category decisions and create new categories if needed
     for (const reviewItem of aiCategoryReviewItems) {
-        let categoryForTransaction = reviewItem.finalCategoryName.trim();
-        if (!categoryForTransaction) { // If user cleared it or it was empty
-            categoryForTransaction = reviewItem.originalCsvCategory; // Fallback to original
+        let finalCategoryForTx = reviewItem.finalCategoryName.trim();
+        if (!finalCategoryForTx) { // If user cleared it or it was empty by mistake
+            finalCategoryForTx = reviewItem.originalCsvCategory; // Fallback to original
         }
         
         const needsCreation = (reviewItem.userDecision === 'keep_original_as_new' || 
                                reviewItem.userDecision === 'custom_new' ||
                               (reviewItem.userDecision === 'ai_suggestion_new' && reviewItem.aiSuggestedNewCategoryName)) &&
-                              !currentDbCategories.some(c => c.name.toLowerCase() === categoryForTransaction.toLowerCase());
+                              !currentDbCategories.some(c => c.name.toLowerCase() === finalCategoryForTx.toLowerCase());
 
-        if (needsCreation && categoryForTransaction) {
+        if (needsCreation && finalCategoryForTx) {
             try {
-                const newCat = await addCategory({ name: categoryForTransaction });
-                currentDbCategories.push(newCat); // Update local cache of DB categories
-                categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, newCat.name);
-                 toast({title: "Category Created", description: `Category "${newCat.name}" was successfully created.`});
+                const newCat = await addCategory({ name: finalCategoryForTx });
+                currentDbCategories.push(newCat); 
+                categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, newCat.name);
+                toast({title: "Category Created", description: `Category "${newCat.name}" was successfully created.`});
             } catch (catError) {
-                const errorMsg = (catError as Error).message || `Failed to create category "${categoryForTransaction}"`;
+                const errorMsg = (catError as Error).message || `Failed to create category "${finalCategoryForTx}"`;
                 toast({ title: "Category Creation Failed", description: errorMsg, variant: "destructive" });
                 setImportErrors(prev => [...prev, errorMsg]);
-                // Fallback: use original CSV category string for transactions if creation fails
-                categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory);
+                categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory); // Fallback
             }
-        } else if (categoryForTransaction) {
-             const existingMatch = currentDbCategories.find(c => c.name.toLowerCase() === categoryForTransaction.toLowerCase());
-             categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, existingMatch ? existingMatch.name : categoryForTransaction);
-        } else { // Fallback if finalCategoryName ended up empty
-            categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory);
+        } else if (finalCategoryForTx) {
+             const existingMatch = currentDbCategories.find(c => c.name.toLowerCase() === finalCategoryForTx.toLowerCase());
+             categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, existingMatch ? existingMatch.name : finalCategoryForTx);
+        } else { // Fallback if finalCategoryName ended up empty (shouldn't happen with current logic but good for safety)
+            categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory);
         }
     }
     
-    // Refresh dbCategories if any were added
+    // Refresh dbCategories from service if any were potentially added (more robust)
     if (aiCategoryReviewItems.some(item => item.userDecision === 'keep_original_as_new' || item.userDecision === 'custom_new' || (item.userDecision === 'ai_suggestion_new' && item.aiSuggestedNewCategoryName))) {
         try {
             const fetchedCategories = await getCategories();
-            setDbCategories(fetchedCategories);
-            currentDbCategories = [...fetchedCategories]; // Ensure currentDbCategories is fully up-to-date
-            // Re-populate categoryNameToDbNameMap with exact names from DB for any newly created ones
+            setDbCategories(fetchedCategories); // Update main state for next time
+            currentDbCategories = [...fetchedCategories]; 
+            // Re-populate map with exact names from DB for any newly created or matched ones
              for (const reviewItem of aiCategoryReviewItems) {
-                let finalName = categoryNameToDbNameMap.get(reviewItem.originalCsvCategory) || reviewItem.originalCsvCategory;
+                let finalName = categoryNameToFinalNameMap.get(reviewItem.originalCsvCategory) || reviewItem.originalCsvCategory;
                 const dbMatch = currentDbCategories.find(c => c.name.toLowerCase() === finalName.toLowerCase());
-                if (dbMatch) categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, dbMatch.name);
+                if (dbMatch) categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, dbMatch.name);
+                else categoryNameToFinalNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory); // Fallback if somehow still not found
              }
-
         } catch (fetchErr) {
-            setImportErrors(prev => [...prev, "Error refreshing categories after additions. Original names will be used."]);
+            setImportErrors(prev => [...prev, "Error refreshing categories after additions. Original names will be used where possible."]);
         }
     }
-
 
     setCurrentTaskMessage('Phase 2: Importing transactions...');
     setProgressValue(80);
@@ -447,6 +444,7 @@ export default function ImportTransactionsPage() {
     const dateCol = Object.keys(columnMap).find(h => columnMap[h] === 'date')!;
     const descriptionCol = Object.keys(columnMap).find(h => columnMap[h] === 'description')!;
     const amountCol = Object.keys(columnMap).find(h => columnMap[h] === 'amount')!;
+    const selectedAccount = accounts.find(acc => acc.id === selectedAccountId);
 
     for (let i = 0; i < csvDataRows.length; i++) {
       const rowData = csvDataRows[i];
@@ -456,21 +454,23 @@ export default function ImportTransactionsPage() {
       const transactionDescriptionStr = rowData[descriptionCol] || '';
       const transactionAmountStr = rowData[amountCol] || '';
       
-      let originalCsvCategoryStr = "Uncategorized"; 
+      let originalCsvCategoryStr = "Uncategorized"; // Default if no category info
       if (categoryCsvHeader && rowData[categoryCsvHeader] && rowData[categoryCsvHeader].trim() !== '') {
           originalCsvCategoryStr = rowData[categoryCsvHeader].trim();
       }
       
-      const finalCategoryForTx = categoryCsvHeader ? (categoryNameToDbNameMap.get(originalCsvCategoryStr) || originalCsvCategoryStr) : "Uncategorized";
+      const finalCategoryForTx = categoryCsvHeader 
+        ? (categoryNameToFinalNameMap.get(originalCsvCategoryStr) || originalCsvCategoryStr) // Use mapped name, or original if not in map (e.g. was "Uncategorized" initially)
+        : "Uncategorized";
 
       const parsedDate = parseDateString(transactionDateStr);
-      const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
+      const parsedAmountRaw = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
 
       if (!parsedDate) {
         localImportErrors.push(`Row ${i + 2}: Invalid/unparseable date "${transactionDateStr}". Skipping.`);
         continue;
       }
-      if (isNaN(parsedAmount)) {
+      if (isNaN(parsedAmountRaw)) {
         localImportErrors.push(`Row ${i + 2}: Invalid amount "${transactionAmountStr}". Skipping.`);
         continue;
       }
@@ -479,11 +479,16 @@ export default function ImportTransactionsPage() {
         continue;
       }
       
+      let finalAmountForDb = parsedAmountRaw;
+      if (selectedAccount && selectedAccount.type === 'credit') {
+        finalAmountForDb = -parsedAmountRaw; // Flip the sign for credit card transactions
+      }
+
       const transactionToImport: AddTransactionData = {
         accountId: selectedAccountId,
         date: parsedDate,
         description: transactionDescriptionStr,
-        amount: parsedAmount,
+        amount: finalAmountForDb,
         category: finalCategoryForTx, 
         fileName: selectedFile.name,
       };
@@ -773,7 +778,6 @@ export default function ImportTransactionsPage() {
                                                 <SelectItem value="pick_existing">Pick Existing DB Category</SelectItem>
                                                 <SelectItem value="keep_original_as_new">Keep Original: "{item.originalCsvCategory}" (as new if needed)</SelectItem>
                                                 <SelectItem value="custom_new">Define Custom New Category</SelectItem>
-                                                {!item.aiSuggestedDbCategoryMatch && !item.aiSuggestedNewCategoryName && <SelectItem value="no_ai_suggestion_keep_original">Keep Original: "{item.originalCsvCategory}"</SelectItem>}
                                             </SelectContent>
                                         </Select>
                                         
