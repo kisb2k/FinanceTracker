@@ -324,51 +324,52 @@ export default function BudgetsPage() {
             </DialogDescription>
           </DialogHeader>
           {editingBudget && (
-            <div className="grid gap-4 py-4">
-              <div className="grid grid-cols-4 items-center gap-4">
+            <div className="grid gap-6 py-4"> {/* Increased gap for main sections */}
+              <div className="grid grid-cols-[1fr_3fr] items-center gap-x-4 gap-y-3"> {/* For name, period, default */}
                 <Label htmlFor="budget-name" className="text-right">Name</Label>
-                <Input id="budget-name" value={editingBudget.name || ''} onChange={(e) => setEditingBudget(p => p ? ({ ...p, name: e.target.value }) : null)} className="col-span-3" placeholder="e.g., Monthly Expenses" />
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
+                <Input id="budget-name" value={editingBudget.name || ''} onChange={(e) => setEditingBudget(p => p ? ({ ...p, name: e.target.value }) : null)} placeholder="e.g., Monthly Expenses" />
+                
                 <Label htmlFor="budget-period" className="text-right">Period</Label>
                 <Select value={editingBudget.timePeriod || 'monthly'} onValueChange={(v) => setEditingBudget(p => p ? ({ ...p, timePeriod: v as 'monthly' | 'yearly' }) : null)}>
-                  <SelectTrigger className="col-span-3"><SelectValue /></SelectTrigger>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="monthly">Monthly</SelectItem>
                     <SelectItem value="yearly">Yearly</SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
-              <div className="grid grid-cols-4 items-center gap-4">
+                
                 <Label htmlFor="budget-default" className="text-right">Default</Label>
-                <Checkbox id="budget-default" checked={editingBudget.isDefault} onCheckedChange={(checked) => setEditingBudget(p => p ? ({...p, isDefault: !!checked}) : null)} className="col-span-3 justify-self-start" />
+                <Checkbox id="budget-default" checked={editingBudget.isDefault} onCheckedChange={(checked) => setEditingBudget(p => p ? ({...p, isDefault: !!checked}) : null)} className="justify-self-start" />
               </div>
               
-              <h4 className="font-medium mt-4 col-span-4">Select Categories & Set Limits ($)</h4>
-              <div className="max-h-[40vh] overflow-y-auto space-y-3 pr-2">
-                {editingBudget.tempCategoryLimits && editingBudget.tempCategoryLimits.length > 0 ? 
-                  editingBudget.tempCategoryLimits.map(item => (
-                    <div key={item.categoryId} className="grid grid-cols-12 items-center gap-2 p-2 rounded-md border">
-                        <div className="col-span-1 flex items-center">
-                           <Checkbox 
-                             id={`cat-select-${item.categoryId}`} 
-                             checked={item.isSelected}
-                             onCheckedChange={(checked) => handleCategorySelectionChange(item.categoryId, Boolean(checked))}
-                           />
-                        </div>
-                        <Label htmlFor={`cat-select-${item.categoryId}`} className="col-span-6 truncate" title={item.categoryName}>{item.categoryName}</Label>
-                        <Input 
-                            id={`limit-${item.categoryId}`} 
-                            type="number" 
-                            value={String(item.limit)} 
-                            onChange={(e) => handleTempCategoryLimitChange(item.categoryId, e.target.value)}
-                            className="col-span-5" 
-                            placeholder="e.g., 200"
-                            disabled={!item.isSelected} 
-                        />
-                    </div>
-                  )) 
-                : <p className="col-span-4 text-sm text-muted-foreground text-center">No categories available. Please add categories on the Transactions page first.</p>}
+              <div className="space-y-3"> {/* Wrapper for category section */}
+                <h4 className="font-medium text-md border-b pb-2">Select Categories & Set Limits ($)</h4>
+                <div className="max-h-[calc(40vh_-_2rem)] overflow-y-auto space-y-2 pr-2 pl-1 py-1"> {/* Adjusted max-h and added some padding */}
+                  {editingBudget.tempCategoryLimits && editingBudget.tempCategoryLimits.length > 0 ? 
+                    editingBudget.tempCategoryLimits.map(item => (
+                      <div key={item.categoryId} className="grid grid-cols-[auto_1fr_100px] items-center gap-x-3 p-3 rounded-md border hover:bg-muted/50 transition-colors">
+                          <Checkbox 
+                            id={`cat-select-${item.categoryId}`} 
+                            checked={item.isSelected}
+                            onCheckedChange={(checked) => handleCategorySelectionChange(item.categoryId, Boolean(checked))}
+                            aria-label={`Select category ${item.categoryName}`}
+                          />
+                          <Label htmlFor={`cat-select-${item.categoryId}`} className="truncate font-normal cursor-pointer" title={item.categoryName}>
+                            {item.categoryName}
+                          </Label>
+                          <Input 
+                              id={`limit-${item.categoryId}`} 
+                              type="number" 
+                              value={String(item.limit === 0 && !item.isSelected ? '' : item.limit)} 
+                              onChange={(e) => handleTempCategoryLimitChange(item.categoryId, e.target.value)}
+                              className="h-8 text-sm" 
+                              placeholder="Limit"
+                              disabled={!item.isSelected} 
+                          />
+                      </div>
+                    )) 
+                  : <p className="text-sm text-muted-foreground text-center py-4">No categories available. Please add categories on the Transactions page first.</p>}
+                </div>
               </div>
             </div>
           )}
