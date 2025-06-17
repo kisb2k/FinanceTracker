@@ -10,41 +10,39 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight, Brain, ListChecks, Review } from "lucide-react";
+import { Loader2, UploadCloud, FileText, CheckCircle, XCircle, Wand2, ArrowRight, Brain, ListChecks, Review, Edit3 } from "lucide-react";
 import type { Account, Category as CategoryType, Transaction } from '@/lib/types';
 import { mapCsvColumns, type MapCsvColumnsOutput, type MappingEntry } from '@/ai/flows/map-csv-columns';
 import { categorizeTransaction } from '@/ai/flows/categorize-transaction';
 import { Progress } from '@/components/ui/progress';
 import { getAccounts, updateAccountLastImported } from '@/services/accountService';
-import { addTransaction, type AddTransactionData, updateMultipleTransactions } from '@/services/transactionService';
+import { addTransaction, type AddTransactionData } from '@/services/transactionService';
 import { getCategories, addCategory } from '@/services/categoryService';
 import { useToast } from '@/hooks/use-toast';
 import { format as formatDateFns, parse as parseDateFns } from 'date-fns';
 
 const expectedTransactionFields = ['date', 'description', 'amount', 'category'];
 const UNMAPPED_PLACEHOLDER_VALUE = "__UNMAPPED_PLACEHOLDER__";
-const AI_CONFIDENCE_THRESHOLD = 0.7; 
-const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5; 
+const AI_CONFIDENCE_THRESHOLD = 0.7;
+const AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD = 0.5;
 
-type ImportStep = 'upload' | 'map_columns' | 'processing' | 'complete';
+type ImportStep = 'upload' | 'map_columns' | 'ai_category_analysis' | 'review_ai_categories' | 'processing' | 'complete';
 
 interface CsvRow {
   [key: string]: string;
 }
 
-interface ImportedTransactionPlaceholder {
-  id: string; 
-  originalData: AddTransactionData; 
-  originalCsvCategory: string; 
-}
-
-interface CategoryProcessingResult {
+interface AiCategoryReviewItem {
+  id: string; // typically originalCsvCategory, or a generated ID if original is empty
   originalCsvCategory: string;
-  aiSuggestedCategory?: string;
+  aiSuggestedDbCategoryMatch?: string; // If AI matched to an existing DB category
+  aiSuggestedNewCategoryName?: string; // If AI suggests creating a new one
   aiConfidence?: number;
-  finalCategoryToUse: string; 
-  actionTaken: 'direct_db_match' | 'ai_matched_to_db' | 'ai_suggested_new_and_created' | 'original_used_as_new_and_created' | 'ai_suggestion_resolved_to_existing_db' | 'creation_failed_resolved_to_existing_db' | 'creation_failed_used_original' | 'ai_error_used_original' | 'no_valid_candidate_used_original';
-  notes: string;
+  
+  // User's choice for this originalCsvCategory
+  userDecision: 'ai_suggestion_db_match' | 'ai_suggestion_new' | 'pick_existing' | 'keep_original_as_new' | 'custom_new' | 'no_ai_suggestion_keep_original';
+  finalCategoryName: string; // What will be used for transactions / created. Editable.
+  selectedExistingDbCategoryId?: string; // if userDecision is 'pick_existing'
 }
 
 
@@ -71,7 +69,7 @@ export default function ImportTransactionsPage() {
   const [columnMap, setColumnMap] = useState<Record<string, string>>({});
   const [progressValue, setProgressValue] = useState(0);
   
-  const [categoryProcessingLog, setCategoryProcessingLog] = useState<CategoryProcessingResult[]>([]);
+  const [aiCategoryReviewItems, setAiCategoryReviewItems] = useState<AiCategoryReviewItem[]>([]);
   
   const { toast } = useToast();
 
@@ -171,7 +169,7 @@ export default function ImportTransactionsPage() {
     setCsvDataRows(fullDataRows);
 
     try {
-      setProgressValue(30);
+      setProgressValue(20);
       const aiMapInputCsv = csvFileContent.split(/\r\n|\n|\r/).slice(0, 10).join('\n'); 
       const aiResult: MapCsvColumnsOutput = await mapCsvColumns({ csvData: aiMapInputCsv });
       
@@ -199,7 +197,7 @@ export default function ImportTransactionsPage() {
       const fallbackMap = parsedHeaders.reduce((acc, header) => ({ ...acc, [header]: '' }), {});
       setColumnMap(fallbackMap);
     }
-    setProgressValue(50);
+    setProgressValue(30);
     setImportStep('map_columns');
     setIsLoading(false);
     setCurrentTaskMessage('');
@@ -231,147 +229,134 @@ export default function ImportTransactionsPage() {
     return null; 
   };
 
-  const runAICategorizationAndUpdateTransactions = async (
-    initiallyImportedPlaceholders: ImportedTransactionPlaceholder[],
-    currentDbCategories: CategoryType[]
-  ): Promise<{ updatedTransactionsCount: number; log: CategoryProcessingResult[] }> => {
-    
-    const localProcessingLog: CategoryProcessingResult[] = [];
-    let tempDbCategories = [...currentDbCategories];
-    const categoryUpdateMap = new Map<string, string>(); 
-    let transactionsToUpdateCount = 0;
 
-    const uniqueOriginalCsvCategories = Array.from(new Set(
-      initiallyImportedPlaceholders
-        .map(p => p.originalCsvCategory)
-        .filter(cat => cat && cat.trim() !== '' && cat.toLowerCase() !== 'uncategorized') 
+  const handleStartAiCategoryAnalysis = async () => {
+    if (!csvDataRows.length) {
+      setPageError("No data rows to analyze.");
+      return;
+    }
+    const categoryCsvHeader = Object.keys(columnMap).find(h => columnMap[h] === 'category');
+    if (!categoryCsvHeader) {
+      toast({ title: "Skipping AI Categorization", description: "Category column not mapped. Proceeding to import.", variant: "default"});
+      setAiCategoryReviewItems([]); // Ensure it's empty
+      setImportStep('processing'); // Skip review if no category column
+      setProgressValue(70);
+      setCurrentTaskMessage("Preparing to import transactions...");
+      // Directly call handleStartActualImport or a similar function if review is skipped
+      // For now, let's assume it goes to 'processing' and then 'complete'
+      // This might need a direct path to saving transactions if review is truly skipped.
+      // For simplicity now, we'll rely on user clicking "Confirm & Import" even if review list is empty.
+      handleStartActualImport();
+      return;
+    }
+
+    setIsLoading(true);
+    setImportStep('ai_category_analysis');
+    setCurrentTaskMessage('AI analyzing CSV categories...');
+    setProgressValue(40);
+
+    const uniqueCsvCategories = Array.from(new Set(
+      csvDataRows.map(row => (row[categoryCsvHeader] || "").trim())
+                 .filter(cat => cat !== "" && cat.toLowerCase() !== "uncategorized")
     ));
 
-    setCurrentTaskMessage('Phase 2: AI analyzing categories...');
-    for (let i = 0; i < uniqueOriginalCsvCategories.length; i++) {
-      const originalCsvCat = uniqueOriginalCsvCategories[i];
-      setProgressValue(70 + Math.floor(((i + 1) / uniqueOriginalCsvCategories.length) * 15)); 
+    if (uniqueCsvCategories.length === 0) {
+        toast({ title: "No Categories for AI", description: "No unique categories found in CSV data for AI analysis (excluding empty or 'uncategorized').", variant: "default"});
+        setAiCategoryReviewItems([]);
+        setImportStep('review_ai_categories'); // Still go to review step, it will show empty
+        setIsLoading(false);
+        setProgressValue(60);
+        setCurrentTaskMessage("AI analysis complete. Ready for review.");
+        return;
+    }
 
-      let finalCategoryToUse = originalCsvCat; // Default to original if all else fails
-      let actionTaken: CategoryProcessingResult['actionTaken'] = 'ai_error_used_original'; // Default action if AI/creation fails
-      let notes = `Starting analysis for CSV category: "${originalCsvCat}".`;
-      let aiSuggestedName: string | undefined = undefined;
-      let aiConfidence: number | undefined = undefined;
-
-      const existingDbMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
+    const reviewItemsPromises = uniqueCsvCategories.map(async (originalCsvCat, index) => {
+      setProgressValue(40 + Math.floor(((index + 1) / uniqueCsvCategories.length) * 20));
+      const existingDbMatch = dbCategories.find(dbCat => dbCat.name.toLowerCase() === originalCsvCat.toLowerCase());
 
       if (existingDbMatch) {
-        finalCategoryToUse = existingDbMatch.name;
-        actionTaken = 'direct_db_match';
-        notes = `Directly matched to existing DB category: "${existingDbMatch.name}".`;
-      } else {
-        try {
-          const aiResult = await categorizeTransaction({
-            transactionDescription: originalCsvCat, 
-            availableCategories: tempDbCategories.map(c => c.name)
-          });
-          aiSuggestedName = aiResult.suggestedCategory.trim();
-          aiConfidence = aiResult.confidence;
+        return {
+          id: originalCsvCat,
+          originalCsvCategory: originalCsvCat,
+          aiSuggestedDbCategoryMatch: existingDbMatch.name,
+          userDecision: 'ai_suggestion_db_match',
+          finalCategoryName: existingDbMatch.name,
+        } as AiCategoryReviewItem;
+      }
 
-          const aiSuggestionMatchesExistingDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
+      try {
+        const aiResult = await categorizeTransaction({
+          transactionDescription: originalCsvCat,
+          availableCategories: dbCategories.map(c => c.name)
+        });
+        const aiSuggestedName = aiResult.suggestedCategory.trim();
+        const aiConfidence = aiResult.confidence;
 
-          if (aiSuggestionMatchesExistingDb && aiConfidence >= AI_CONFIDENCE_THRESHOLD) {
-            finalCategoryToUse = aiSuggestionMatchesExistingDb.name;
-            actionTaken = 'ai_matched_to_db';
-            notes = `AI mapped to existing DB category "${aiSuggestionMatchesExistingDb.name}" (Confidence: ${aiConfidence.toFixed(2)}).`;
-          } else {
-            let candidateForNewCategory = (aiSuggestedName && aiConfidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD) ? aiSuggestedName : originalCsvCat;
-            candidateForNewCategory = candidateForNewCategory.trim(); 
+        const aiSuggestionMatchesExistingDb = dbCategories.find(dbCat => dbCat.name.toLowerCase() === aiSuggestedName.toLowerCase());
 
-            if (!candidateForNewCategory) {
-                notes = `AI suggestion and original CSV category were effectively empty. Using original: "${originalCsvCat}".`;
-                actionTaken = 'no_valid_candidate_used_original';
-            } else {
-                const candidateAlreadyExistsInDb = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
-
-                if (candidateAlreadyExistsInDb) {
-                    finalCategoryToUse = candidateAlreadyExistsInDb.name;
-                    actionTaken = 'ai_suggestion_resolved_to_existing_db';
-                    notes = `AI suggestion ("${aiSuggestedName}") or original ("${originalCsvCat}") resolved to existing DB category "${candidateAlreadyExistsInDb.name}".`;
-                } else {
-                    try {
-                        const newDbCat = await addCategory({ name: candidateForNewCategory });
-                        tempDbCategories.push(newDbCat); 
-                        finalCategoryToUse = newDbCat.name;
-                        actionTaken = candidateForNewCategory === originalCsvCat ? 'original_used_as_new_and_created' : 'ai_suggested_new_and_created';
-                        notes = `Successfully created new DB category: "${newDbCat.name}" based on "${candidateForNewCategory}".`;
-                    } catch (createError) {
-                        notes = `Failed to create new category "${candidateForNewCategory}": ${(createError as Error).message}. Using original: "${originalCsvCat}".`;
-                        const refreshedDbCategories = await getCategories(); 
-                        setDbCategories(refreshedDbCategories);
-                        tempDbCategories = [...refreshedDbCategories];
-                        const finalCheckMatch = tempDbCategories.find(dbCat => dbCat.name.toLowerCase() === candidateForNewCategory.toLowerCase());
-                        if (finalCheckMatch) {
-                            finalCategoryToUse = finalCheckMatch.name;
-                            actionTaken = 'creation_failed_resolved_to_existing_db';
-                            notes += ` Found matching DB category "${finalCheckMatch.name}" after re-fetch. Using it.`;
-                        } else {
-                            actionTaken = 'creation_failed_used_original';
-                        }
-                    }
-                }
-            }
-          }
-        } catch (aiError) {
-          actionTaken = 'ai_error_used_original';
-          notes = `Error during AI processing for "${originalCsvCat}": ${(aiError as Error).message}. Using original: "${originalCsvCat}".`;
+        if (aiSuggestionMatchesExistingDb && aiConfidence >= AI_CONFIDENCE_THRESHOLD) {
+          return {
+            id: originalCsvCat,
+            originalCsvCategory: originalCsvCat,
+            aiSuggestedDbCategoryMatch: aiSuggestionMatchesExistingDb.name,
+            aiConfidence: aiConfidence,
+            userDecision: 'ai_suggestion_db_match',
+            finalCategoryName: aiSuggestionMatchesExistingDb.name,
+          } as AiCategoryReviewItem;
+        } else if (aiSuggestedName && aiConfidence >= AI_NEW_CATEGORY_CONFIDENCE_THRESHOLD && !aiSuggestionMatchesExistingDb) {
+          return {
+            id: originalCsvCat,
+            originalCsvCategory: originalCsvCat,
+            aiSuggestedNewCategoryName: aiSuggestedName,
+            aiConfidence: aiConfidence,
+            userDecision: 'ai_suggestion_new',
+            finalCategoryName: aiSuggestedName,
+          } as AiCategoryReviewItem;
         }
+      } catch (aiError) {
+        console.error(`AI categorization error for "${originalCsvCat}":`, aiError);
+        // Fall through to default (keep original)
       }
       
-      categoryUpdateMap.set(originalCsvCat, finalCategoryToUse);
-      localProcessingLog.push({
+      // Default if AI fails or doesn't give a confident suggestion
+      return {
+        id: originalCsvCat,
         originalCsvCategory: originalCsvCat,
-        aiSuggestedCategory: aiSuggestedName,
-        aiConfidence: aiConfidence,
-        finalCategoryToUse: finalCategoryToUse,
-        actionTaken: actionTaken,
-        notes: notes
-      });
-    }
-    setCategoryProcessingLog(prev => [...prev, ...localProcessingLog]);
+        userDecision: 'no_ai_suggestion_keep_original', // Or 'keep_original_as_new'
+        finalCategoryName: originalCsvCat,
+      } as AiCategoryReviewItem;
+    });
 
-    setCurrentTaskMessage('Phase 2.2: Updating transaction categories in database...');
-    setProgressValue(85);
-    const transactionIdsToUpdateByCategory = new Map<string, string[]>();
+    const resolvedReviewItems = await Promise.all(reviewItemsPromises);
+    setAiCategoryReviewItems(resolvedReviewItems);
+    setImportStep('review_ai_categories');
+    setIsLoading(false);
+    setProgressValue(60);
+    setCurrentTaskMessage("AI analysis complete. Please review category suggestions.");
+  };
 
-    for(const placeholder of initiallyImportedPlaceholders) {
-        if (placeholder.originalCsvCategory && placeholder.originalCsvCategory.toLowerCase() !== 'uncategorized') {
-            const finalCategoryName = categoryUpdateMap.get(placeholder.originalCsvCategory);
-            if (finalCategoryName && finalCategoryName !== placeholder.originalData.category) { 
-                if (!transactionIdsToUpdateByCategory.has(finalCategoryName)) {
-                    transactionIdsToUpdateByCategory.set(finalCategoryName, []);
-                }
-                transactionIdsToUpdateByCategory.get(finalCategoryName)!.push(placeholder.id);
-            }
+  const handleCategoryReviewChange = (originalCatId: string, field: keyof AiCategoryReviewItem, value: any) => {
+    setAiCategoryReviewItems(prevItems => 
+      prevItems.map(item => {
+        if (item.id === originalCatId) {
+          const updatedItem = { ...item, [field]: value };
+          // If userDecision changes, reset finalCategoryName or selectedExistingDbCategoryId accordingly
+          if (field === 'userDecision') {
+            if (value === 'ai_suggestion_db_match') updatedItem.finalCategoryName = item.aiSuggestedDbCategoryMatch || item.originalCsvCategory;
+            else if (value === 'ai_suggestion_new') updatedItem.finalCategoryName = item.aiSuggestedNewCategoryName || item.originalCsvCategory;
+            else if (value === 'pick_existing') { /* Keep existing finalCategoryName or prompt user */ }
+            else if (value === 'keep_original_as_new' || value === 'no_ai_suggestion_keep_original') updatedItem.finalCategoryName = item.originalCsvCategory;
+            else if (value === 'custom_new') updatedItem.finalCategoryName = ""; // Clear for user input
+            updatedItem.selectedExistingDbCategoryId = undefined;
+          }
+          if (field === 'selectedExistingDbCategoryId' && value !== "") {
+             updatedItem.finalCategoryName = dbCategories.find(c => c.id === value)?.name || item.finalCategoryName;
+          }
+          return updatedItem;
         }
-    }
-    
-    let currentUpdateProgress = 0;
-    const totalUpdatesToMake = Array.from(transactionIdsToUpdateByCategory.values()).reduce((sum, ids) => sum + ids.length, 0);
-
-    for (const [finalCategoryName, txIds] of transactionIdsToUpdateByCategory) {
-      if (txIds.length > 0) {
-        try {
-          await updateMultipleTransactions(txIds, { category: finalCategoryName });
-          transactionsToUpdateCount += txIds.length;
-        } catch (updateError) {
-          setImportErrors(prev => [...prev, `Failed to update ${txIds.length} transactions to category "${finalCategoryName}": ${(updateError as Error).message}`]);
-        }
-      }
-      currentUpdateProgress += txIds.length;
-      setProgressValue(85 + Math.floor((currentUpdateProgress / (totalUpdatesToMake || 1)) * 10)); 
-    }
-
-    const finalDbCategories = await getCategories();
-    setDbCategories(finalDbCategories);
-
-
-    return { updatedTransactionsCount: transactionsToUpdateCount, log: localProcessingLog };
+        return item;
+      })
+    );
   };
 
 
@@ -395,14 +380,68 @@ export default function ImportTransactionsPage() {
     setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
-    setCategoryProcessingLog([]); 
     setImportStep('processing');
-    setCurrentTaskMessage('Phase 1: Saving initial transactions...');
-    setProgressValue(55); 
+    setCurrentTaskMessage('Phase 1: Processing category decisions...');
+    setProgressValue(70); 
 
+    const categoryNameToDbNameMap = new Map<string, string>();
+    let currentDbCategories = [...dbCategories];
+
+    for (const reviewItem of aiCategoryReviewItems) {
+        let categoryForTransaction = reviewItem.finalCategoryName.trim();
+        if (!categoryForTransaction) { // If user cleared it or it was empty
+            categoryForTransaction = reviewItem.originalCsvCategory; // Fallback to original
+        }
+        
+        const needsCreation = (reviewItem.userDecision === 'keep_original_as_new' || 
+                               reviewItem.userDecision === 'custom_new' ||
+                              (reviewItem.userDecision === 'ai_suggestion_new' && reviewItem.aiSuggestedNewCategoryName)) &&
+                              !currentDbCategories.some(c => c.name.toLowerCase() === categoryForTransaction.toLowerCase());
+
+        if (needsCreation && categoryForTransaction) {
+            try {
+                const newCat = await addCategory({ name: categoryForTransaction });
+                currentDbCategories.push(newCat); // Update local cache of DB categories
+                categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, newCat.name);
+                 toast({title: "Category Created", description: `Category "${newCat.name}" was successfully created.`});
+            } catch (catError) {
+                const errorMsg = (catError as Error).message || `Failed to create category "${categoryForTransaction}"`;
+                toast({ title: "Category Creation Failed", description: errorMsg, variant: "destructive" });
+                setImportErrors(prev => [...prev, errorMsg]);
+                // Fallback: use original CSV category string for transactions if creation fails
+                categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory);
+            }
+        } else if (categoryForTransaction) {
+             const existingMatch = currentDbCategories.find(c => c.name.toLowerCase() === categoryForTransaction.toLowerCase());
+             categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, existingMatch ? existingMatch.name : categoryForTransaction);
+        } else { // Fallback if finalCategoryName ended up empty
+            categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, reviewItem.originalCsvCategory);
+        }
+    }
+    
+    // Refresh dbCategories if any were added
+    if (aiCategoryReviewItems.some(item => item.userDecision === 'keep_original_as_new' || item.userDecision === 'custom_new' || (item.userDecision === 'ai_suggestion_new' && item.aiSuggestedNewCategoryName))) {
+        try {
+            const fetchedCategories = await getCategories();
+            setDbCategories(fetchedCategories);
+            currentDbCategories = [...fetchedCategories]; // Ensure currentDbCategories is fully up-to-date
+            // Re-populate categoryNameToDbNameMap with exact names from DB for any newly created ones
+             for (const reviewItem of aiCategoryReviewItems) {
+                let finalName = categoryNameToDbNameMap.get(reviewItem.originalCsvCategory) || reviewItem.originalCsvCategory;
+                const dbMatch = currentDbCategories.find(c => c.name.toLowerCase() === finalName.toLowerCase());
+                if (dbMatch) categoryNameToDbNameMap.set(reviewItem.originalCsvCategory, dbMatch.name);
+             }
+
+        } catch (fetchErr) {
+            setImportErrors(prev => [...prev, "Error refreshing categories after additions. Original names will be used."]);
+        }
+    }
+
+
+    setCurrentTaskMessage('Phase 2: Importing transactions...');
+    setProgressValue(80);
     let importedCount = 0;
     let localImportErrors: string[] = [];
-    const newlyImportedPlaceholders: ImportedTransactionPlaceholder[] = [];
 
     const categoryCsvHeader = Object.keys(columnMap).find(h => columnMap[h] === 'category');
     const dateCol = Object.keys(columnMap).find(h => columnMap[h] === 'date')!;
@@ -411,7 +450,7 @@ export default function ImportTransactionsPage() {
 
     for (let i = 0; i < csvDataRows.length; i++) {
       const rowData = csvDataRows[i];
-      setProgressValue(55 + Math.floor(((i + 1) / csvDataRows.length) * 15)); 
+      setProgressValue(80 + Math.floor(((i + 1) / csvDataRows.length) * 15)); 
       
       const transactionDateStr = rowData[dateCol] || '';
       const transactionDescriptionStr = rowData[descriptionCol] || '';
@@ -422,6 +461,8 @@ export default function ImportTransactionsPage() {
           originalCsvCategoryStr = rowData[categoryCsvHeader].trim();
       }
       
+      const finalCategoryForTx = categoryCsvHeader ? (categoryNameToDbNameMap.get(originalCsvCategoryStr) || originalCsvCategoryStr) : "Uncategorized";
+
       const parsedDate = parseDateString(transactionDateStr);
       const parsedAmount = parseFloat(transactionAmountStr.replace(/[^0-9.-]+/g,""));
 
@@ -443,17 +484,12 @@ export default function ImportTransactionsPage() {
         date: parsedDate,
         description: transactionDescriptionStr,
         amount: parsedAmount,
-        category: originalCsvCategoryStr, 
+        category: finalCategoryForTx, 
         fileName: selectedFile.name,
       };
 
       try {
-        const savedTx = await addTransaction(transactionToImport);
-        newlyImportedPlaceholders.push({ 
-            id: savedTx.id, 
-            originalData: transactionToImport, 
-            originalCsvCategory: originalCsvCategoryStr 
-        });
+        await addTransaction(transactionToImport);
         importedCount++;
       } catch (txError) {
         localImportErrors.push(`Row ${i + 2} ("${transactionDescriptionStr.substring(0,20)}..."): ${(txError as Error).message}`);
@@ -461,16 +497,14 @@ export default function ImportTransactionsPage() {
     }
     setImportErrors(prev => [...prev, ...localImportErrors]);
 
-    if (newlyImportedPlaceholders.length > 0) {
-      const { updatedTransactionsCount, log } = await runAICategorizationAndUpdateTransactions(newlyImportedPlaceholders, dbCategories);
-      
+    if (importedCount > 0) {
       try {
           await updateAccountLastImported(selectedAccountId);
       } catch (accUpdateError) {
           setImportErrors(prev => [...prev, `Failed to update account's last import date: ${(accUpdateError as Error).message}`]);
       }
       setSuccessMessage(
-        `Import complete. ${importedCount} transactions initially saved. ${updatedTransactionsCount} transactions had their categories updated by AI. Check AI log for details.`
+        `Import complete. ${importedCount} transactions saved with reviewed categories.`
       );
     } else if (localImportErrors.length > 0 && importedCount === 0) {
        setPageError(`No transactions were imported. See issues below.`);
@@ -487,7 +521,7 @@ export default function ImportTransactionsPage() {
     setProgressValue(100);
     setCurrentTaskMessage('');
     toast({
-      title: importedCount > 0 ? "Import & Categorization Process Complete" : "Import Finished with Issues",
+      title: importedCount > 0 ? "Import Process Complete" : "Import Finished with Issues",
       description: successMessage || `${importedCount} transactions processed. Check logs for details.`,
       variant: importedCount > 0 && importErrors.length === 0 ? "default" : "destructive"
     });
@@ -500,7 +534,7 @@ export default function ImportTransactionsPage() {
     setPageError(null);
     setSuccessMessage(null);
     setImportErrors([]);
-    setCategoryProcessingLog([]);
+    setAiCategoryReviewItems([]);
     setImportStep('upload');
     setCsvFileContent('');
     setCsvHeaders([]);
@@ -619,7 +653,7 @@ export default function ImportTransactionsPage() {
               <CardTitle>Step 2: Map CSV Columns</CardTitle>
               <CardDescription>
                 Match your CSV columns to the standard transaction fields. AI suggestions are pre-filled if successful.
-                <Wand2 className="inline ml-2 h-4 w-4 text-primary" />
+                <Wand2 className="inline ml-2 h-4 w-4 text-primary" /> Essential fields: Date, Description, Amount. Category is recommended.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
@@ -675,34 +709,124 @@ export default function ImportTransactionsPage() {
             </CardContent>
             <CardFooter className="justify-between">
                <Button type="button" variant="outline" onClick={() => { setImportStep('upload'); setProgressValue(0); setIsLoading(false); setPageError(null); }}>Back to Upload</Button>
-               <Button onClick={handleStartActualImport} disabled={isLoading}>
+               <Button 
+                 onClick={handleStartAiCategoryAnalysis} 
+                 disabled={isLoading || !Object.values(columnMap).includes('date') || !Object.values(columnMap).includes('description') || !Object.values(columnMap).includes('amount')}
+               >
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Brain className="mr-2 h-4 w-4" />}
-                Confirm Mappings & Start Import
+                Analyze Categories with AI
               </Button>
             </CardFooter>
         </Card>
       )}
       
+      {importStep === 'ai_category_analysis' && (
+         <Card className="shadow-lg">
+            <CardHeader>
+              <CardTitle>AI Analyzing Categories...</CardTitle>
+              <CardDescription>Please wait while AI processes the categories from your CSV file.</CardDescription>
+            </CardHeader>
+            <CardContent>
+                <Progress value={progressValue} className="w-full" />
+                {currentTaskMessage && <p className="text-sm text-muted-foreground text-center mt-3 animate-pulse">{currentTaskMessage}</p>}
+            </CardContent>
+         </Card>
+      )}
+
+      {importStep === 'review_ai_categories' && (
+        <Card className="shadow-lg">
+            <CardHeader>
+                <CardTitle>Step 3: Review AI Category Suggestions</CardTitle>
+                <CardDescription>Review AI's suggestions for your CSV categories. Adjust as needed before importing.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+                {aiCategoryReviewItems.length === 0 ? (
+                    <p className="text-muted-foreground text-center py-4">No categories required AI review or no categories were mapped for processing.</p>
+                ) : (
+                <div className="overflow-x-auto max-h-[60vh]">
+                    <Table>
+                        <TableHeader>
+                            <TableRow>
+                                <TableHead className="w-[25%]">Original CSV Category</TableHead>
+                                <TableHead className="w-[30%]">AI Suggestion</TableHead>
+                                <TableHead className="w-[45%]">Your Decision & Final Category</TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {aiCategoryReviewItems.map((item) => (
+                                <TableRow key={item.id}>
+                                    <TableCell className="font-medium align-top">{item.originalCsvCategory}</TableCell>
+                                    <TableCell className="align-top">
+                                        {item.aiSuggestedDbCategoryMatch && <p>Match: <span className="font-semibold">{item.aiSuggestedDbCategoryMatch}</span> (Conf: {item.aiConfidence?.toFixed(2)})</p>}
+                                        {item.aiSuggestedNewCategoryName && <p>Suggest New: <span className="font-semibold">{item.aiSuggestedNewCategoryName}</span> (Conf: {item.aiConfidence?.toFixed(2)})</p>}
+                                        {!item.aiSuggestedDbCategoryMatch && !item.aiSuggestedNewCategoryName && <p className="text-muted-foreground italic">No confident AI suggestion.</p>}
+                                    </TableCell>
+                                    <TableCell className="space-y-2 align-top">
+                                        <Select 
+                                            value={item.userDecision} 
+                                            onValueChange={(value) => handleCategoryReviewChange(item.id, 'userDecision', value)}
+                                        >
+                                            <SelectTrigger><SelectValue placeholder="Choose action" /></SelectTrigger>
+                                            <SelectContent>
+                                                {item.aiSuggestedDbCategoryMatch && <SelectItem value="ai_suggestion_db_match">Use AI Match: "{item.aiSuggestedDbCategoryMatch}"</SelectItem>}
+                                                {item.aiSuggestedNewCategoryName && <SelectItem value="ai_suggestion_new">Use AI New: "{item.aiSuggestedNewCategoryName}"</SelectItem>}
+                                                <SelectItem value="pick_existing">Pick Existing DB Category</SelectItem>
+                                                <SelectItem value="keep_original_as_new">Keep Original: "{item.originalCsvCategory}" (as new if needed)</SelectItem>
+                                                <SelectItem value="custom_new">Define Custom New Category</SelectItem>
+                                                {!item.aiSuggestedDbCategoryMatch && !item.aiSuggestedNewCategoryName && <SelectItem value="no_ai_suggestion_keep_original">Keep Original: "{item.originalCsvCategory}"</SelectItem>}
+                                            </SelectContent>
+                                        </Select>
+                                        
+                                        {(item.userDecision === 'pick_existing') && (
+                                             <Select
+                                                value={item.selectedExistingDbCategoryId || ""}
+                                                onValueChange={(value) => handleCategoryReviewChange(item.id, 'selectedExistingDbCategoryId', value)}
+                                            >
+                                                <SelectTrigger><SelectValue placeholder="Select DB category..." /></SelectTrigger>
+                                                <SelectContent>
+                                                    {dbCategories.map(cat => <SelectItem key={cat.id} value={cat.id}>{cat.name}</SelectItem>)}
+                                                </SelectContent>
+                                            </Select>
+                                        )}
+                                        {(item.userDecision === 'custom_new') && (
+                                            <Input 
+                                                placeholder="Enter custom category name" 
+                                                value={item.finalCategoryName === item.originalCsvCategory || item.finalCategoryName === item.aiSuggestedDbCategoryMatch || item.finalCategoryName === item.aiSuggestedNewCategoryName ? "" : item.finalCategoryName}
+                                                onChange={(e) => handleCategoryReviewChange(item.id, 'finalCategoryName', e.target.value)}
+                                            />
+                                        )}
+                                        {(item.userDecision !== 'custom_new' && item.userDecision !== 'pick_existing') && (
+                                           <p className="text-sm text-muted-foreground mt-1">Final: <span className="font-medium">{item.finalCategoryName}</span></p>
+                                        )}
+                                    </TableCell>
+                                </TableRow>
+                            ))}
+                        </TableBody>
+                    </Table>
+                </div>
+                )}
+            </CardContent>
+            <CardFooter className="justify-between">
+                 <Button type="button" variant="outline" onClick={() => setImportStep('map_columns')}>Back to Column Mapping</Button>
+                 <Button onClick={handleStartActualImport} disabled={isLoading}>
+                    {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ListChecks className="mr-2 h-4 w-4" />}
+                    Confirm Categories & Import Transactions
+                </Button>
+            </CardFooter>
+        </Card>
+      )}
+
       {importStep === 'processing' && (
         <Card className="shadow-lg">
             <CardHeader>
               <CardTitle>Processing Import...</CardTitle>
               <CardDescription>
-                Your file is being imported and categories analyzed. Please wait. This may take a few moments.
+                Your file is being imported with reviewed categories. Please wait. This may take a few moments.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
                  <Progress value={progressValue} className="w-full mb-4" />
                  {currentTaskMessage && <p className="text-sm text-muted-foreground text-center animate-pulse">{currentTaskMessage}</p>}
-                 {categoryProcessingLog.length > 0 && (
-                    <div>
-                        <h4 className="font-semibold text-sm mb-1">AI Categorization Summary (Live):</h4>
-                        <div className="max-h-60 overflow-y-auto text-xs p-2 border rounded-md bg-muted/50 space-y-1">
-                            {categoryProcessingLog.slice(-5).map((log, idx) => <p key={`cat-log-proc-${idx}`}>"{log.originalCsvCategory}" <ArrowRight className="inline h-3 w-3"/> "{log.finalCategoryToUse}" ({log.actionTaken.replace(/_/g, ' ')})</p>)}
-                            {categoryProcessingLog.length > 5 && <p>...and more</p>}
-                        </div>
-                    </div>
-                 )}
             </CardContent>
         </Card>
       )}
@@ -714,22 +838,6 @@ export default function ImportTransactionsPage() {
             </CardHeader>
             <CardContent>
                 <p className="mb-4">The import process is complete. Review any messages and logs for details.</p>
-                 {categoryProcessingLog.length > 0 && (
-                     <div className="space-y-3">
-                        <h4 className="font-semibold">AI Categorization Log (Full):</h4>
-                        <div className="max-h-80 overflow-y-auto text-xs p-3 border rounded-md bg-muted/50 space-y-1.5">
-                            {categoryProcessingLog.map((log, idx) => (
-                                <div key={`cat-log-final-${idx}`} className="p-1.5 border-b last:border-b-0">
-                                    <p><strong>Original CSV:</strong> "{log.originalCsvCategory}"</p>
-                                    {log.aiSuggestedCategory && <p><strong>AI Suggestion:</strong> "{log.aiSuggestedCategory}" (Confidence: {log.aiConfidence !== undefined ? log.aiConfidence.toFixed(2) : 'N/A'})</p>}
-                                    <p><strong>Action:</strong> <span className={`font-medium ${log.actionTaken.includes('created') ? 'text-green-600' : log.actionTaken.includes('failed') || log.actionTaken.includes('error') || log.actionTaken.includes('original') ? 'text-orange-600' : ''}`}>{log.actionTaken.replace(/_/g, ' ')}</span></p>
-                                    <p><strong>Final Category Used:</strong> "{log.finalCategoryToUse}"</p>
-                                    <p className="text-muted-foreground text-[0.7rem]"><em>Notes: {log.notes}</em></p>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-                 )}
             </CardContent>
             <CardFooter className="flex flex-col sm:flex-row justify-between gap-2">
                 <Button variant="outline" onClick={resetForm}>Import Another File</Button>
